@@ -1,7 +1,7 @@
 import * as Sentry from "@sentry/node";
-import BullQueue from "bull";
+import { Worker, Queue, QueueScheduler, Job } from "bullmq";
 import { addSeconds, differenceInSeconds } from "date-fns";
-import { isArray, isEmpty, isNil } from "lodash";
+import { isArray, isEmpty, isNil, chunk } from "lodash";
 import moment from "moment";
 import path from "path";
 import { Op, QueryTypes } from "sequelize";
@@ -12,6 +12,7 @@ import formatBody from "./helpers/Mustache";
 import { MessageData, SendMessage } from "./helpers/SendMessage";
 import { getIO } from "./libs/socket";
 import { getWbot } from "./libs/wbot";
+import { getRedis } from "./libs/redis";
 import Campaign from "./models/Campaign";
 import CampaignSetting from "./models/CampaignSetting";
 import CampaignShipping from "./models/CampaignShipping";
@@ -28,17 +29,50 @@ import { getMessageOptions } from "./services/WbotServices/SendWhatsAppMedia";
 import { ClosedAllOpenTickets } from "./services/WbotServices/wbotClosedTickets";
 import { logger } from "./utils/logger";
 
-
 const nodemailer = require('nodemailer');
 const CronJob = require('cron').CronJob;
 
-const connection = process.env.REDIS_URI || "";
-const limiterMax = process.env.REDIS_OPT_LIMITER_MAX || 1;
-const limiterDuration = process.env.REDIS_OPT_LIMITER_DURATION || 3000;
+// Configurações de conexão e limites
+const connection = {
+  connection: getRedis(),
+  // Configurações para melhor desempenho e gerenciamento de memória
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: {
+      type: 'exponential',
+      delay: 5000
+    },
+    removeOnComplete: {
+      age: 3600, // Remove jobs concluídos após 1 hora
+      count: 1000 // Mantém apenas os últimos 1000 jobs concluídos
+    },
+    removeOnFail: {
+      age: 24 * 3600 // Remove jobs falhos após 24 horas
+    }
+  }
+};
 
+// Configurações de limitação de taxa
+const limiterMax = parseInt(process.env.REDIS_OPT_LIMITER_MAX || "5", 10);
+const limiterDuration = parseInt(process.env.REDIS_OPT_LIMITER_DURATION || "3000", 10);
+
+// Configurações para processamento em lotes
+const BATCH_SIZE = parseInt(process.env.CAMPAIGN_BATCH_SIZE || "50", 10);
+const MAX_CONCURRENT_BATCHES = parseInt(process.env.MAX_CONCURRENT_BATCHES || "3", 10);
+
+// Interfaces para tipagem
 interface ProcessCampaignData {
   id: number;
   delay: number;
+}
+
+interface ContactBatchData {
+  contacts: {
+    contactId: number;
+    campaignId: number;
+  }[];
+  campaignId: number;
+  batchIndex: number;
 }
 
 interface PrepareContactData {
@@ -54,170 +88,158 @@ interface DispatchCampaignData {
   contactListItemId: number;
 }
 
-export const userMonitor = new BullQueue("UserMonitor", connection);
+// Definição das filas com BullMQ
+export const userMonitor = new Queue("UserMonitor", connection);
+export const userMonitorScheduler = new QueueScheduler("UserMonitor", connection);
 
-export const queueMonitor = new BullQueue("QueueMonitor", connection);
+export const queueMonitor = new Queue("QueueMonitor", connection);
+export const queueMonitorScheduler = new QueueScheduler("QueueMonitor", connection);
 
-export const messageQueue = new BullQueue("MessageQueue", connection, {
+export const messageQueue = new Queue("MessageQueue", {
+  ...connection,
   limiter: {
-    max: limiterMax as number,
-    duration: limiterDuration as number
+    max: limiterMax,
+    duration: limiterDuration
+  }
+});
+export const messageQueueScheduler = new QueueScheduler("MessageQueue", connection);
+
+export const scheduleMonitor = new Queue("ScheduleMonitor", connection);
+export const scheduleMonitorScheduler = new QueueScheduler("ScheduleMonitor", connection);
+
+export const sendScheduledMessages = new Queue("SendScheduledMessages", connection);
+export const sendScheduledMessagesScheduler = new QueueScheduler("SendScheduledMessages", connection);
+
+export const campaignQueue = new Queue("CampaignQueue", connection);
+export const campaignQueueScheduler = new QueueScheduler("CampaignQueue", connection);
+
+// Nova fila para processamento em lotes
+export const batchCampaignQueue = new Queue("BatchCampaignQueue", {
+  ...connection,
+  limiter: {
+    max: MAX_CONCURRENT_BATCHES,
+    duration: 1000
+  }
+});
+export const batchCampaignQueueScheduler = new QueueScheduler("BatchCampaignQueue", connection);
+
+// Processadores de filas
+const messageWorker = new Worker("MessageQueue", async (job: Job) => {
+  try {
+    await handleSendMessage(job);
+  } catch (e) {
+    logger.error(`MessageQueue error: ${e.message}`);
+    throw e;
+  }
+}, {
+  connection: getRedis(),
+  concurrency: 5, // Processa até 5 mensagens simultaneamente
+  limiter: {
+    max: limiterMax,
+    duration: limiterDuration
   }
 });
 
-export const scheduleMonitor = new BullQueue("ScheduleMonitor", connection);
-export const sendScheduledMessages = new BullQueue(
-  "SendSacheduledMessages",
-  connection
-);
-
-export const campaignQueue = new BullQueue("CampaignQueue", connection);
-
-async function handleSendMessage(job) {
+const scheduleMonitorWorker = new Worker("ScheduleMonitor", async (job: Job) => {
   try {
-    const { data } = job;
-
-    const whatsapp = await Whatsapp.findByPk(data.whatsappId);
-
-    if (whatsapp == null) {
-      throw Error("Whatsapp não identificado");
-    }
-
-    const messageData: MessageData = data.data;
-
-    await SendMessage(whatsapp, messageData);
-  } catch (e: any) {
-    Sentry.captureException(e);
-    logger.error("MessageQueue -> SendMessage: error", e.message);
+    await handleVerifySchedules(job);
+  } catch (e) {
+    logger.error(`ScheduleMonitor error: ${e.message}`);
     throw e;
   }
+}, {
+  connection: getRedis(),
+  concurrency: 1 // Apenas um processo de verificação por vez
+});
+
+const sendScheduledMessagesWorker = new Worker("SendScheduledMessages", async (job: Job) => {
+  try {
+    await handleSendScheduledMessage(job);
+  } catch (e) {
+    logger.error(`SendScheduledMessages error: ${e.message}`);
+    throw e;
+  }
+}, {
+  connection: getRedis(),
+  concurrency: 3 // Processa até 3 mensagens agendadas simultaneamente
+});
+
+const campaignQueueWorker = new Worker("CampaignQueue", async (job: Job) => {
+  try {
+    await handleProcessCampaign(job);
+  } catch (e) {
+    logger.error(`CampaignQueue error: ${e.message}`);
+    throw e;
+  }
+}, {
+  connection: getRedis(),
+  concurrency: 2 // Processa até 2 campanhas simultaneamente
+});
+
+// Novo worker para processamento em lotes
+const batchCampaignQueueWorker = new Worker("BatchCampaignQueue", async (job: Job) => {
+  try {
+    await handleProcessContactBatch(job);
+  } catch (e) {
+    logger.error(`BatchCampaignQueue error: ${e.message}`);
+    throw e;
+  }
+}, {
+  connection: getRedis(),
+  concurrency: MAX_CONCURRENT_BATCHES // Processa até MAX_CONCURRENT_BATCHES lotes simultaneamente
+});
+
+// Manipuladores de eventos para todos os workers
+[messageWorker, scheduleMonitorWorker, sendScheduledMessagesWorker, campaignQueueWorker, batchCampaignQueueWorker].forEach(worker => {
+  worker.on('completed', (job) => {
+    logger.info(`${job.queueName} job ${job.id} completed`);
+  });
+  
+  worker.on('failed', (job, err) => {
+    logger.error(`${job.queueName} job ${job.id} failed: ${err.message}`);
+    Sentry.captureException(err);
+  });
+  
+  worker.on('error', (err) => {
+    logger.error(`Worker error: ${err.message}`);
+    Sentry.captureException(err);
+  });
+});
+
+// Funções de manipulação de jobs
+async function handleSendMessage(job: Job) {
+  const { data } = job;
+
+  const whatsapp = await Whatsapp.findByPk(data.whatsappId);
+
+  if (whatsapp == null) {
+    throw Error("Whatsapp não identificado");
+  }
+
+  const messageData: MessageData = data.data;
+
+  await SendMessage(whatsapp, messageData);
 }
-
-{/*async function handleVerifyQueue(job) {
-  logger.info("Buscando atendimentos perdidos nas filas");
-  try {
-    const companies = await Company.findAll({
-      attributes: ['id', 'name'],
-      where: {
-        status: true,
-        dueDate: {
-          [Op.gt]: Sequelize.literal('CURRENT_DATE')
-        }
-      },
-      include: [
-        {
-          model: Whatsapp, attributes: ["id", "name", "status", "timeSendQueue", "sendIdQueue"], where: {
-            timeSendQueue: {
-              [Op.gt]: 0
-            }
-          }
-        },
-      ]
-    }); */}
-
-{/*    companies.map(async c => {
-      c.whatsapps.map(async w => {
-
-        if (w.status === "CONNECTED") {
-
-          var companyId = c.id;
-
-          const moveQueue = w.timeSendQueue ? w.timeSendQueue : 0;
-          const moveQueueId = w.sendIdQueue;
-          const moveQueueTime = moveQueue;
-          const idQueue = moveQueueId;
-          const timeQueue = moveQueueTime;
-
-          if (moveQueue > 0) {
-
-            if (!isNaN(idQueue) && Number.isInteger(idQueue) && !isNaN(timeQueue) && Number.isInteger(timeQueue)) {
-
-              const tempoPassado = moment().subtract(timeQueue, "minutes").utc().format();
-              // const tempoAgora = moment().utc().format();
-
-              const { count, rows: tickets } = await Ticket.findAndCountAll({
-                where: {
-                  status: "pending",
-                  queueId: null,
-                  companyId: companyId,
-                  whatsappId: w.id,
-                  updatedAt: {
-                    [Op.lt]: tempoPassado
-                  }
-                },
-                include: [
-                  {
-                    model: Contact,
-                    as: "contact",
-                    attributes: ["id", "name", "number", "email", "profilePicUrl"],
-                    include: ["extraInfo"]
-                  }
-                ]
-              });
-
-              if (count > 0) {
-                tickets.map(async ticket => {
-                  await ticket.update({
-                    queueId: idQueue
-                  });
-
-                  await ticket.reload();
-
-                  const io = getIO();
-                  io.to(ticket.status)
-                    .to("notification")
-                    .to(ticket.id.toString())
-                    .emit(`company-${companyId}-ticket`, {
-                      action: "update",
-                      ticket,
-                      ticketId: ticket.id
-                    });
-
-                  // io.to("pending").emit(`company-${companyId}-ticket`, {
-                  //   action: "update",
-                  //   ticket,
-                  // });
-
-                  logger.info(`Atendimento Perdido: ${ticket.id} - Empresa: ${companyId}`);
-                });
-              } else {
-                logger.info(`Nenhum atendimento perdido encontrado - Empresa: ${companyId}`);
-              }
-            } else {
-              logger.info(`Condição não respeitada - Empresa: ${companyId}`);
-            }
-          }
-        }
-      });
-    });
-  } catch (e: any) {
-    Sentry.captureException(e);
-    logger.error("SearchForQueue -> VerifyQueue: error", e.message);
-    throw e;
-  }
-}; */}
 
 async function handleCloseTicketsAutomatic() {
   const job = new CronJob('*/1 * * * *', async () => {
     const companies = await Company.findAll();
     companies.map(async c => {
-
       try {
         const companyId = c.id;
         await ClosedAllOpenTickets(companyId);
       } catch (e: any) {
         Sentry.captureException(e);
         logger.error("ClosedAllOpenTickets -> Verify: error", e.message);
-        throw e;
       }
-
     });
   });
-  job.start()
+  job.start();
 }
 
-async function handleVerifySchedules(job) {
+async function handleVerifySchedules(job: Job) {
   try {
+    // Otimização: Buscar apenas os campos necessários e limitar a quantidade
     const { count, rows: schedules } = await Schedule.findAndCountAll({
       where: {
         status: "PENDENTE",
@@ -227,20 +249,38 @@ async function handleVerifySchedules(job) {
           [Op.lte]: moment().add("30", "seconds").format("YYYY-MM-DD HH:mm:ss")
         }
       },
-      include: [{ model: Contact, as: "contact" }]
+      include: [{ 
+        model: Contact, 
+        as: "contact",
+        attributes: ["id", "name", "number", "email", "condominio", "endereco", "cargo"] // Incluindo novos campos
+      }],
+      limit: 100 // Limitar para evitar sobrecarga
     });
+    
     if (count > 0) {
-      schedules.map(async schedule => {
-        await schedule.update({
-          status: "AGENDADA"
-        });
-        sendScheduledMessages.add(
-          "SendMessage",
-          { schedule },
-          { delay: 40000 }
+      // Processamento em lotes para agendamentos
+      const batches = chunk(schedules, 10);
+      
+      for (const batch of batches) {
+        // Atualizar status em lote
+        await Schedule.update(
+          { status: "AGENDADA" },
+          { where: { id: batch.map(s => s.id) } }
         );
-        logger.info(`Disparo agendado para: ${schedule.contact.name}`);
-      });
+        
+        // Adicionar à fila com pequenos delays entre cada mensagem do lote
+        batch.forEach((schedule, index) => {
+          sendScheduledMessages.add(
+            "SendMessage",
+            { schedule },
+            { 
+              delay: 40000 + (index * 1000), // Adicionar delay incremental para cada mensagem
+              removeOnComplete: true 
+            }
+          );
+          logger.info(`Disparo agendado para: ${schedule.contact.name}`);
+        });
+      }
     }
   } catch (e: any) {
     Sentry.captureException(e);
@@ -249,7 +289,7 @@ async function handleVerifySchedules(job) {
   }
 }
 
-async function handleSendScheduledMessage(job) {
+async function handleSendScheduledMessage(job: Job) {
   const {
     data: { schedule }
   } = job;
@@ -257,12 +297,12 @@ async function handleSendScheduledMessage(job) {
 
   try {
     scheduleRecord = await Schedule.findByPk(schedule.id);
-  } catch (e) {
-    Sentry.captureException(e);
-    logger.info(`Erro ao tentar consultar agendamento: ${schedule.id}`);
-  }
-
-  try {
+    
+    if (!scheduleRecord) {
+      logger.error(`Agendamento não encontrado: ${schedule.id}`);
+      return;
+    }
+    
     const whatsapp = await GetDefaultWhatsApp(schedule.companyId);
 
     let filePath = null;
@@ -270,75 +310,98 @@ async function handleSendScheduledMessage(job) {
       filePath = path.resolve("public", `company${schedule.companyId}`, schedule.mediaPath);
     }
 
-    // 🔥 Adicionando logs para depuração
-    console.log("🚀 Agendamento - filePath:", filePath);
-    console.log("🚀 Agendamento - schedule.mediaPath:", schedule.mediaPath);
-    console.log("🚀 Agendamento - schedule:", schedule);
-
     await SendMessage(whatsapp, {
       number: schedule.contact.number,
       body: formatBody(schedule.body, schedule.contact),
       mediaPath: filePath
     });
 
-    await scheduleRecord?.update({
+    await scheduleRecord.update({
       sentAt: moment().format("YYYY-MM-DD HH:mm"),
       status: "ENVIADA"
     });
 
     logger.info(`Mensagem agendada enviada para: ${schedule.contact.name}`);
-    sendScheduledMessages.clean(15000, "completed");
+    
+    // Limpar jobs concluídos periodicamente
+    if (Math.random() < 0.1) { // 10% de chance para evitar sobrecarga
+      await sendScheduledMessages.clean(15000, "completed");
+    }
   } catch (e: any) {
     Sentry.captureException(e);
-    await scheduleRecord?.update({
-      status: "ERRO"
-    });
+    if (scheduleRecord) {
+      await scheduleRecord.update({
+        status: "ERRO"
+      });
+    }
     logger.error("SendScheduledMessage -> SendMessage: error", e.message);
     throw e;
   }
 }
 
-async function handleVerifyCampaigns(job) {
-  /**
-   * @todo
-   * Implementar filtro de campanhas
-   */
-  const campaigns: { id: number; scheduledAt: string }[] =
-    await sequelize.query(
-      `select id, "scheduledAt" from "Campaigns" c
-    where "scheduledAt" between now() and now() + '1 hour'::interval and status = 'PROGRAMADA'`,
-      { type: QueryTypes.SELECT }
-    );
+async function handleVerifyCampaigns(job: Job) {
+  try {
+    // Otimização: Usar índices e limitar a janela de tempo
+    const campaigns: { id: number; scheduledAt: string }[] =
+      await sequelize.query(
+        `SELECT id, "scheduledAt" 
+         FROM "Campaigns" 
+         WHERE "scheduledAt" BETWEEN now() AND now() + '1 hour'::interval 
+         AND status = 'PROGRAMADA'
+         ORDER BY "scheduledAt" ASC
+         LIMIT 50`,
+        { type: QueryTypes.SELECT }
+      );
 
-  if (campaigns.length > 0)
-    logger.info(`Campanhas encontradas: ${campaigns.length}`);
-  
-  for (let campaign of campaigns) {
-    try {
-      const now = moment();
-      const scheduledAt = moment(campaign.scheduledAt);
-      const delay = scheduledAt.diff(now, "milliseconds");
-      logger.info(
-        `Campanha enviada para a fila de processamento: Campanha=${campaign.id}, Delay Inicial=${delay}`
-      );
-      campaignQueue.add(
-        "ProcessCampaign",
-        {
-          id: campaign.id,
-          delay
-        },
-        {
-          removeOnComplete: true
+    if (campaigns.length > 0) {
+      logger.info(`Campanhas encontradas: ${campaigns.length}`);
+    
+      for (let campaign of campaigns) {
+        try {
+          const now = moment();
+          const scheduledAt = moment(campaign.scheduledAt);
+          const delay = scheduledAt.diff(now, "milliseconds");
+          
+          logger.info(
+            `Campanha enviada para a fila de processamento: Campanha=${campaign.id}, Delay Inicial=${delay}`
+          );
+          
+          await campaignQueue.add(
+            "ProcessCampaign",
+            {
+              id: campaign.id,
+              delay
+            },
+            {
+              delay: Math.max(0, delay - 5000), // Iniciar processamento 5 segundos antes
+              removeOnComplete: true
+            }
+          );
+        } catch (err: any) {
+          Sentry.captureException(err);
+          logger.error(`Erro ao processar campanha ${campaign.id}: ${err.message}`);
         }
-      );
-    } catch (err: any) {
-      Sentry.captureException(err);
+      }
     }
+  } catch (e: any) {
+    Sentry.captureException(e);
+    logger.error(`Erro ao verificar campanhas: ${e.message}`);
   }
 }
 
-async function getCampaign(id) {
-  return await Campaign.findByPk(id, {
+async function getCampaign(id: number) {
+  // Otimização: Usar cache para campanhas
+  const redis = getRedis();
+  const cacheKey = `campaign:${id}`;
+  
+  // Tentar obter do cache primeiro
+  const cachedData = await redis.get(cacheKey);
+  if (cachedData) {
+    return JSON.parse(cachedData);
+  }
+  
+  // Se não estiver em cache, buscar do banco
+  const campaign = await Campaign.findByPk(id, {
     include: [
       {
         model: ContactList,
@@ -348,7 +411,7 @@ async function getCampaign(id) {
           {
             model: ContactListItem,
             as: "contacts",
-            attributes: ["id", "name", "number", "email", "isWhatsappValid"],
+            attributes: ["id", "name", "number", "email", "condominio", "endereco", "cargo", "isWhatsappValid"], // Incluindo novos campos
             where: { isWhatsappValid: true }
           }
         ]
@@ -361,19 +424,38 @@ async function getCampaign(id) {
       {
         model: CampaignShipping,
         as: "shipping",
-        include: [{ model: ContactListItem, as: "contact" }]
+        include: [{ 
+          model: ContactListItem, 
+          as: "contact",
+          attributes: ["id", "name", "number", "email", "condominio", "endereco", "cargo"] // Incluindo novos campos
+        }]
       }
     ]
   });
+  
+  // Salvar no cache com TTL de 5 minutos
+  await redis.set(cacheKey, JSON.stringify(campaign), 'EX', 300);
+  
+  return campaign;
 }
 
-async function getContact(id) {
+async function getContact(id: number) {
   return await ContactListItem.findByPk(id, {
-    attributes: ["id", "name", "number", "email"]
+    attributes: ["id", "name", "number", "email", "condominio", "endereco", "cargo"] // Incluindo novos campos
   });
 }
 
-async function getSettings(campaign) {
+async function getSettings(campaign: Campaign) {
+  // Otimização: Usar cache para configurações
+  const redis = getRedis();
+  const cacheKey = `campaign:settings:${campaign.companyId}`;
+  
+  // Tentar obter do cache primeiro
+  const cachedData = await redis.get(cacheKey);
+  if (cachedData) {
+    return JSON.parse(cachedData);
+  }
+  
   const settings = await CampaignSetting.findAll({
     where: { companyId: campaign.companyId },
     attributes: ["key", "value"]
@@ -399,25 +481,30 @@ async function getSettings(campaign) {
     }
   });
 
-  return {
+  const result = {
     messageInterval,
     longerIntervalAfter,
     greaterInterval,
     variables
   };
+  
+  // Salvar no cache com TTL de 10 minutos
+  await redis.set(cacheKey, JSON.stringify(result), 'EX', 600);
+  
+  return result;
 }
 
-export function parseToMilliseconds(seconds) {
+export function parseToMilliseconds(seconds: number): number {
   return seconds * 1000;
 }
 
-async function sleep(seconds) {
-  logger.info(
+async function sleep(seconds: number): Promise<boolean> {
+  logger.debug(
     `Sleep de ${seconds} segundos iniciado: ${moment().format("HH:mm:ss")}`
   );
   return new Promise(resolve => {
     setTimeout(() => {
-      logger.info(
+      logger.debug(
         `Sleep de ${seconds} segundos finalizado: ${moment().format(
           "HH:mm:ss"
         )}`
@@ -427,7 +514,7 @@ async function sleep(seconds) {
   });
 }
 
-function getCampaignValidMessages(campaign) {
+function getCampaignValidMessages(campaign: Campaign): string[] {
   const messages = [];
 
   if (!isEmpty(campaign.message1) && !isNil(campaign.message1)) {
@@ -453,7 +540,7 @@ function getCampaignValidMessages(campaign) {
   return messages;
 }
 
-function getCampaignValidConfirmationMessages(campaign) {
+function getCampaignValidConfirmationMessages(campaign: Campaign): string[] {
   const messages = [];
 
   if (
@@ -494,36 +581,49 @@ function getCampaignValidConfirmationMessages(campaign) {
   return messages;
 }
 
-function getProcessedMessage(msg: string, variables: any[], contact: any) {
+function getProcessedMessage(msg: string, variables: any[], contact: any): string {
   let finalMessage = msg;
 
   if (finalMessage.includes("{nome}")) {
-    finalMessage = finalMessage.replace(/{nome}/g, contact.name);
+    finalMessage = finalMessage.replace(/{nome}/g, contact.name || "");
   }
 
   if (finalMessage.includes("{email}")) {
-    finalMessage = finalMessage.replace(/{email}/g, contact.email);
+    finalMessage = finalMessage.replace(/{email}/g, contact.email || "");
   }
 
   if (finalMessage.includes("{numero}")) {
-    finalMessage = finalMessage.replace(/{numero}/g, contact.number);
+    finalMessage = finalMessage.replace(/{numero}/g, contact.number || "");
+  }
+  
+  // Suporte para novos campos
+  if (finalMessage.includes("{condominio}")) {
+    finalMessage = finalMessage.replace(/{condominio}/g, contact.condominio || "");
+  }
+  
+  if (finalMessage.includes("{endereco}")) {
+    finalMessage = finalMessage.replace(/{endereco}/g, contact.endereco || "");
+  }
+  
+  if (finalMessage.includes("{cargo}")) {
+    finalMessage = finalMessage.replace(/{cargo}/g, contact.cargo || "");
   }
 
   variables.forEach(variable => {
     if (finalMessage.includes(`{${variable.key}}`)) {
       const regex = new RegExp(`{${variable.key}}`, "g");
-      finalMessage = finalMessage.replace(regex, variable.value);
+      finalMessage = finalMessage.replace(regex, variable.value || "");
     }
   });
 
   return finalMessage;
 }
 
-export function randomValue(min, max) {
+export function randomValue(min: number, max: number): number {
   return Math.floor(Math.random() * max) + min;
 }
 
-async function verifyAndFinalizeCampaign(campaign) {
+async function verifyAndFinalizeCampaign(campaign: Campaign): Promise<void> {
   const { contacts } = campaign.contactList;
 
   const count1 = contacts.length;
@@ -537,7 +637,11 @@ async function verifyAndFinalizeCampaign(campaign) {
   });
 
   if (count1 === count2) {
-    await campaign.update({ status: "FINALIZADA", completedAt: moment() });
+    await campaign.update({ status: "FINALIZADA", completedAt: moment().toDate() });
+    
+    // Limpar cache quando a campanha for finalizada
+    const redis = getRedis();
+    await redis.del(`campaign:${campaign.id}`);
   }
 
   const io = getIO();
@@ -547,433 +651,234 @@ async function verifyAndFinalizeCampaign(campaign) {
   });
 }
 
-function calculateDelay(index, baseDelay, longerIntervalAfter, greaterInterval, messageInterval) {
+function calculateDelay(index: number, baseDelay: Date, longerIntervalAfter: number, greaterInterval: number, messageInterval: number): number {
   const diffSeconds = differenceInSeconds(baseDelay, new Date());
   if (index > longerIntervalAfter) {
-    return diffSeconds * 1000 + greaterInterval
+    return diffSeconds * 1000 + greaterInterval;
   } else {
-    return diffSeconds * 1000 + messageInterval
+    return diffSeconds * 1000 + messageInterval;
   }
 }
 
-async function handleProcessCampaign(job) {
+// Novo manipulador para processamento em lotes
+async function handleProcessContactBatch(job: Job): Promise<void> {
+  const { contacts, campaignId, batchIndex } = job.data as ContactBatchData;
+  
+  try {
+    const campaign = await getCampaign(campaignId);
+    if (!campaign) {
+      logger.error(`Campanha não encontrada: ${campaignId}`);
+      return;
+    }
+    
+    const settings = await getSettings(campaign);
+    
+    // Preparar todas as mensagens do lote
+    const messages = [];
+    for (const contactData of contacts) {
+      const contact = await getContact(contactData.contactId);
+      if (!contact) continue;
+      
+      const campaignMessages = getCampaignValidMessages(campaign);
+      if (campaignMessages.length === 0) continue;
+      
+      // Selecionar uma mensagem aleatória da campanha
+      const messageIndex = Math.floor(Math.random() * campaignMessages.length);
+      const message = campaignMessages[messageIndex];
+      
+      // Processar a mensagem com as variáveis
+      const body = getProcessedMessage(message, settings.variables, contact);
+      
+      messages.push({
+        contactId: contact.id,
+        body,
+        campaignId
+      });
+    }
+    
+    // Processar mensagens em paralelo com limite de concorrência
+    const results = await Promise.all(
+      messages.map(async (message, index) => {
+        try {
+          // Adicionar pequeno delay entre mensagens do mesmo lote
+          await sleep(index * 0.2); // 200ms entre cada mensagem
+          
+          // Criar ou atualizar registro de envio
+          const [campaignShipping] = await CampaignShipping.findOrCreate({
+            where: {
+              campaignId,
+              contactListItemId: message.contactId
+            },
+            defaults: {
+              campaignId,
+              contactListItemId: message.contactId,
+              body: message.body
+            }
+          });
+          
+          // Adicionar à fila de mensagens
+          await messageQueue.add(
+            "SendMessage",
+            {
+              whatsappId: campaign.whatsappId,
+              data: {
+                number: contacts.find(c => c.contactId === message.contactId)?.number,
+                body: message.body
+              }
+            },
+            {
+              removeOnComplete: true,
+              attempts: 3
+            }
+          );
+          
+          // Atualizar status de envio
+          await campaignShipping.update({
+            deliveredAt: moment().toDate()
+          });
+          
+          return { success: true, contactId: message.contactId };
+        } catch (err) {
+          logger.error(`Erro ao processar mensagem para contato ${message.contactId}: ${err.message}`);
+          return { success: false, contactId: message.contactId, error: err.message };
+        }
+      })
+    );
+    
+    // Verificar se a campanha foi finalizada
+    await verifyAndFinalizeCampaign(campaign);
+    
+    // Log de resultados
+    const successCount = results.filter(r => r.success).length;
+    logger.info(`Lote ${batchIndex} da campanha ${campaignId} processado: ${successCount}/${messages.length} mensagens enviadas com sucesso`);
+    
+  } catch (err) {
+    logger.error(`Erro ao processar lote ${batchIndex} da campanha ${campaignId}: ${err.message}`);
+    Sentry.captureException(err);
+    throw err;
+  }
+}
+
+// Manipulador de processamento de campanha reescrito para usar lotes
+async function handleProcessCampaign(job: Job): Promise<void> {
   try {
     const { id }: ProcessCampaignData = job.data;
     const campaign = await getCampaign(id);
     const settings = await getSettings(campaign);
-    if (campaign) {
-      const { contacts } = campaign.contactList;
-      if (isArray(contacts)) {
-        const contactData = contacts.map(contact => ({
-          contactId: contact.id,
-          campaignId: campaign.id,
-          variables: settings.variables,
-        }));
-
-        // const baseDelay = job.data.delay || 0;
-        const longerIntervalAfter = parseToMilliseconds(settings.longerIntervalAfter);
-        const greaterInterval = parseToMilliseconds(settings.greaterInterval);
-        const messageInterval = settings.messageInterval;
-
-        let baseDelay = campaign.scheduledAt;
-
-        const queuePromises = [];
-        for (let i = 0; i < contactData.length; i++) {
-          baseDelay = addSeconds(baseDelay, i > longerIntervalAfter ? greaterInterval : messageInterval);
-
-          const { contactId, campaignId, variables } = contactData[i];
-          const delay = calculateDelay(i, baseDelay, longerIntervalAfter, greaterInterval, messageInterval);
-          const queuePromise = campaignQueue.add(
-            "PrepareContact",
-            { contactId, campaignId, variables, delay },
-            { removeOnComplete: true }
-          );
-          queuePromises.push(queuePromise);
-          logger.info(`Registro enviado pra fila de disparo: Campanha=${campaign.id};Contato=${contacts[i].name};delay=${delay}`);
-        }
-        await Promise.all(queuePromises);
-        await campaign.update({ status: "EM_ANDAMENTO" });
-      }
+    
+    if (!campaign) {
+      logger.error(`Campanha não encontrada: ${id}`);
+      return;
     }
-  } catch (err: any) {
-    Sentry.captureException(err);
-  }
-}
-
-let ultima_msg = 0;
-async function handlePrepareContact(job) {
-  try {
-    const { contactId, campaignId, delay, variables }: PrepareContactData =
-      job.data;
-    const campaign = await getCampaign(campaignId);
-    const contact = await getContact(contactId);
-
-    const campaignShipping: any = {};
-    campaignShipping.number = contact.number;
-    campaignShipping.contactId = contactId;
-    campaignShipping.campaignId = campaignId;
-
-    const messages = getCampaignValidMessages(campaign);
-    if (messages.length) {
-      const radomIndex = ultima_msg;
-      console.log('ultima_msg:', ultima_msg);
-      ultima_msg++;
-      if (ultima_msg >= messages.length) {
-        ultima_msg = 0;
-      }
-      const message = getProcessedMessage(
-        messages[radomIndex],
-        variables,
-        contact
-      );
-      campaignShipping.message = `\u200c ${message}`;
+    
+    // Atualizar status da campanha
+    await campaign.update({ status: "EM_ANDAMENTO" });
+    
+    const { contacts } = campaign.contactList;
+    if (!isArray(contacts) || contacts.length === 0) {
+      logger.warn(`Campanha ${id} não possui contatos válidos`);
+      await campaign.update({ status: "FINALIZADA", completedAt: moment().toDate() });
+      return;
     }
-
-    if (campaign.confirmation) {
-      const confirmationMessages =
-        getCampaignValidConfirmationMessages(campaign);
-      if (confirmationMessages.length) {
-        const radomIndex = randomValue(0, confirmationMessages.length);
-        const message = getProcessedMessage(
-          confirmationMessages[radomIndex],
-          variables,
-          contact
-        );
-        campaignShipping.confirmationMessage = `\u200c ${message}`;
-      }
-    }
-
-    const [record, created] = await CampaignShipping.findOrCreate({
-      where: {
-        campaignId: campaignShipping.campaignId,
-        contactId: campaignShipping.contactId
-      },
-      defaults: campaignShipping
-    });
-
-    if (
-      !created &&
-      record.deliveredAt === null &&
-      record.confirmationRequestedAt === null
-    ) {
-      record.set(campaignShipping);
-      await record.save();
-    }
-
-    if (
-      record.deliveredAt === null &&
-      record.confirmationRequestedAt === null
-    ) {
-      const nextJob = await campaignQueue.add(
-        "DispatchCampaign",
+    
+    // Dividir contatos em lotes
+    const batches = chunk(contacts, BATCH_SIZE);
+    logger.info(`Campanha ${id} dividida em ${batches.length} lotes de até ${BATCH_SIZE} contatos`);
+    
+    // Adicionar cada lote à fila com delay apropriado
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      
+      // Calcular delay entre lotes para evitar bloqueios
+      const batchDelay = batchIndex * parseToMilliseconds(settings.messageInterval) * (BATCH_SIZE / 10);
+      
+      await batchCampaignQueue.add(
+        "ProcessContactBatch",
         {
+          contacts: batch.map(contact => ({
+            contactId: contact.id,
+            campaignId: campaign.id,
+            number: contact.number
+          })),
           campaignId: campaign.id,
-          campaignShippingId: record.id,
-          contactListItemId: contactId
+          batchIndex
         },
-        {
-          delay
+        { 
+          delay: batchDelay,
+          removeOnComplete: true,
+          attempts: 3
         }
       );
-
-      await record.update({ jobId: nextJob.id });
-    }
-
-    await verifyAndFinalizeCampaign(campaign);
-  } catch (err: any) {
-    Sentry.captureException(err);
-    logger.error(`campaignQueue -> PrepareContact -> error: ${err.message}`);
-  }
-}
-
-async function handleDispatchCampaign(job) {
-  try {
-    const { data } = job;
-    const { campaignShippingId, campaignId }: DispatchCampaignData = data;
-    const campaign = await getCampaign(campaignId);
-    const wbot = await GetWhatsappWbot(campaign.whatsapp);
-
-    if (!wbot) {
-      logger.error(`campaignQueue -> DispatchCampaign -> error: wbot not found`);
-      return;
-    }
-
-    if (!campaign.whatsapp) {
-      logger.error(`campaignQueue -> DispatchCampaign -> error: whatsapp not found`);
-      return;
-    }
-
-    if (!wbot?.user?.id) {
-      logger.error(`campaignQueue -> DispatchCampaign -> error: wbot user not found`);
-      return;
-    }
-
-    logger.info(
-      `Disparo de campanha solicitado: Campanha=${campaignId};Registro=${campaignShippingId}`
-    );
-
-    const campaignShipping = await CampaignShipping.findByPk(
-      campaignShippingId,
-      {
-        include: [{ model: ContactListItem, as: "contact" }]
-      }
-    );
-
-    const chatId = `${campaignShipping.number}@s.whatsapp.net`;
-
-    let body = campaignShipping.message;
-
-    if (campaign.confirmation && campaignShipping.confirmation === null) {
-      body = campaignShipping.confirmationMessage
-    }
-
-    if (!isNil(campaign.fileListId)) {
-      try {
-        const publicFolder = path.resolve(__dirname, "..", "public");
-        const files = await ShowFileService(campaign.fileListId, campaign.companyId)
-        const folder = path.resolve(publicFolder, `company${campaign.companyId}`,"fileList", String(files.id))
-        for (const [index, file] of files.options.entries()) {
-          /*const options = await getMessageOptions(file.path, path.resolve(folder, file.path), file.name);*/
-
-          const options = await getMessageOptions(file.name, path.resolve(folder, file.path), String(campaign.companyId), body);
-          await wbot.sendMessage(chatId, { ...options });
-        };
-      } catch (error) {
-        logger.info(error);
-      }
-    }
-
-    if (campaign.mediaPath) {
-            const publicFolder = path.resolve(__dirname, "..", "public");
-            const filePath = path.join(publicFolder, `company${campaign.companyId}`, campaign.mediaPath);
-
-            console.log("queues.ts -> Body antes de getMessageOptions:", body); // Verifica se o texto está aqui
       
-      const options = await getMessageOptions(campaign.mediaPath, filePath, String(campaign.companyId), body);            
-      console.log("Options retornadas:", options); // Verifica se o caption está no options
-      
-      if (Object.keys(options).length) {
-        await wbot.sendMessage(chatId, { ...options });
-      }
+      logger.info(`Lote ${batchIndex} da campanha ${id} adicionado à fila com delay de ${batchDelay}ms`);
     }
-    else {
-      if (campaign.confirmation && campaignShipping.confirmation === null) {
-        await wbot.sendMessage(chatId, {
-          text: body
-        });
-        await campaignShipping.update({ confirmationRequestedAt: moment() });
-      } else {
-
-        await wbot.sendMessage(chatId, {
-          text: body
-        });
-      }
-    }
-    await campaignShipping.update({ deliveredAt: moment() });
-
-    await verifyAndFinalizeCampaign(campaign);
-
+    
+    // Notificar frontend sobre início do processamento
     const io = getIO();
     io.to(`company-${campaign.companyId}-mainchannel`).emit(`company-${campaign.companyId}-campaign`, {
       action: "update",
       record: campaign
     });
-
-    logger.info(
-      `Campanha enviada para: Campanha=${campaignId};Contato=${campaignShipping.contact.name}`
-    );
+    
   } catch (err: any) {
     Sentry.captureException(err);
-    logger.error(err.message);
-    console.log(err.stack);
+    logger.error(`Erro ao processar campanha: ${err.message}`);
+    throw err;
   }
 }
 
-async function handleLoginStatus(job) {
-  const users: { id: number }[] = await sequelize.query(
-    `select id from "Users" where "updatedAt" < now() - '5 minutes'::interval and online = true`,
-    { type: QueryTypes.SELECT }
-  );
-  for (let item of users) {
-    try {
-      const user = await User.findByPk(item.id);
-      await user.update({ online: false });
-      logger.info(`Usuário passado para offline: ${item.id}`);
-    } catch (e: any) {
-      Sentry.captureException(e);
-    }
-  }
-}
-
-
-async function handleInvoiceCreate() {
-  logger.info("GERENDO RECEITA...");
-  const job = new CronJob('*/5 * * * * *', async () => {
-    const companies = await Company.findAll();
-    companies.map(async c => {
-    
-      const status = c.status;
-      const dueDate = c.dueDate; 
-      const date = moment(dueDate).format();
-      const timestamp = moment().format();
-      const hoje = moment().format("DD/MM/yyyy");
-      const vencimento = moment(dueDate).format("DD/MM/yyyy");
-      const diff = moment(vencimento, "DD/MM/yyyy").diff(moment(hoje, "DD/MM/yyyy"));
-      const dias = moment.duration(diff).asDays();
-    
-      if(status === true){
-
-      	//logger.info(`EMPRESA: ${c.id} está ATIVA com vencimento em: ${vencimento} | ${dias}`);
-      
-      	//Verifico se a empresa está a mais de 10 dias sem pagamento
-        
-        if(dias <= -3){
-       
-          logger.info(`EMPRESA: ${c.id} está VENCIDA A MAIS DE 3 DIAS... INATIVANDO... ${dias}`);
-          c.status = false;
-          await c.save(); // Save the updated company record
-          logger.info(`EMPRESA: ${c.id} foi INATIVADA.`);
-          logger.info(`EMPRESA: ${c.id} Desativando conexões com o WhatsApp...`);
-          
-          try {
-    		const whatsapps = await Whatsapp.findAll({
-      		where: {
-        		companyId: c.id,
-      		},
-      			attributes: ['id','status','session'],
-    		});
-
-    		for (const whatsapp of whatsapps) {
-
-            	if (whatsapp.session) {
-    				await whatsapp.update({ status: "DISCONNECTED", session: "" });
-    				const wbot = getWbot(whatsapp.id);
-    				await wbot.logout();
-                	logger.info(`EMPRESA: ${c.id} teve o WhatsApp ${whatsapp.id} desconectado...`);
-  				}
-    		}
-          
-  		  } catch (error) {
-    		// Lidar com erros, se houver
-    		console.error('Erro ao buscar os IDs de WhatsApp:', error);
-    		throw error;
-  		  }
-
-        
-        }else{ // ELSE if(dias <= -3){
-        
-          const plan = await Plan.findByPk(c.planId);
-        
-          const sql = `SELECT * FROM "Invoices" WHERE "companyId" = ${c.id} AND "status" = 'open';`
-          const openInvoices = await sequelize.query(sql, { type: QueryTypes.SELECT }) as { id: number, dueDate: Date }[];
-
-          const existingInvoice = openInvoices.find(invoice => moment(invoice.dueDate).format("DD/MM/yyyy") === vencimento);
-        
-          if (existingInvoice) {
-            // Due date already exists, no action needed
-            //logger.info(`Fatura Existente`);
-        
-          } else if (openInvoices.length > 0) {
-            const updateSql = `UPDATE "Invoices" SET "dueDate" = '${date}', "updatedAt" = '${timestamp}' WHERE "id" = ${openInvoices[0].id};`;
-
-            await sequelize.query(updateSql, { type: QueryTypes.UPDATE });
-        
-            logger.info(`Fatura Atualizada ID: ${openInvoices[0].id}`);
-        
-          } else {
-          
-            const sql = `INSERT INTO "Invoices" (detail, status, value, "updatedAt", "createdAt", "dueDate", "companyId")
-            VALUES ('${plan.name}', 'open', '${plan.value}', '${timestamp}', '${timestamp}', '${date}', ${c.id});`
-
-            const invoiceInsert = await sequelize.query(sql, { type: QueryTypes.INSERT });
-        
-            logger.info(`Fatura Gerada para o cliente: ${c.id}`);
-
-            // Rest of the code for sending email
-          }
-        
-          
-        
-        
-        } // if(dias <= -6){
-        
-
-      }else{ // ELSE if(status === true){
-      
-      	//logger.info(`EMPRESA: ${c.id} está INATIVA`);
-      
-      }
-    
-    
-
-    });
-  });
-
-  job.start();
-}
-
-
-
-handleCloseTicketsAutomatic()
-
-handleInvoiceCreate()
-
-export async function startQueueProcess() {
-  logger.info("Iniciando processamento de filas");
-
-  messageQueue.process("SendMessage", handleSendMessage);
-
-  scheduleMonitor.process("Verify", handleVerifySchedules);
-
-  sendScheduledMessages.process("SendMessage", handleSendScheduledMessage);
-
-  campaignQueue.process("VerifyCampaigns", handleVerifyCampaigns);
-
-  campaignQueue.process("ProcessCampaign", handleProcessCampaign);
-
-  campaignQueue.process("PrepareContact", handlePrepareContact);
-
-  campaignQueue.process("DispatchCampaign", handleDispatchCampaign);
-
-  userMonitor.process("VerifyLoginStatus", handleLoginStatus);
-
-  //queueMonitor.process("VerifyQueueStatus", handleVerifyQueue);
-
-
-
-  scheduleMonitor.add(
-    "Verify",
+// Inicialização
+export const initQueues = async (): Promise<void> => {
+  logger.info("Inicializando filas...");
+  
+  // Adicionar job recorrente para verificar campanhas agendadas
+  await scheduleMonitor.add(
+    "VerifySchedules",
     {},
     {
-      repeat: { cron: "*/5 * * * * *", key: "verify" },
+      repeat: {
+        every: 30000 // A cada 30 segundos
+      },
       removeOnComplete: true
     }
   );
-
-  campaignQueue.add(
+  
+  // Adicionar job recorrente para verificar campanhas
+  await campaignQueue.add(
     "VerifyCampaigns",
     {},
     {
-      repeat: { cron: "*/20 * * * * *", key: "verify-campaing" },
+      repeat: {
+        every: 60000 // A cada 1 minuto
+      },
       removeOnComplete: true
     }
   );
+  
+  // Iniciar fechamento automático de tickets
+  handleCloseTicketsAutomatic();
+  
+  logger.info("Filas inicializadas com sucesso");
+};
 
-  userMonitor.add(
-    "VerifyLoginStatus",
-    {},
-    {
-      repeat: { cron: "* * * * *", key: "verify-login" },
-      removeOnComplete: true
-    }
-  );
+// Registrar processadores de jobs recorrentes
+scheduleMonitorWorker.on('active', async job => {
+  if (job.name === 'VerifySchedules') {
+    await handleVerifySchedules(job);
+  }
+});
 
-  queueMonitor.add(
-    "VerifyQueueStatus",
-    {},
-    {
-      repeat: { cron: "*/20 * * * * *" },
-      removeOnComplete: true
-    }
-  );
-}
+campaignQueueWorker.on('active', async job => {
+  if (job.name === 'VerifyCampaigns') {
+    await handleVerifyCampaigns(job);
+  }
+});
+
+// Exportar funções úteis para uso em outros módulos
+export {
+  handleVerifyCampaigns,
+  handleVerifySchedules,
+  handleProcessCampaign,
+  handleProcessContactBatch,
+  verifyAndFinalizeCampaign
+};

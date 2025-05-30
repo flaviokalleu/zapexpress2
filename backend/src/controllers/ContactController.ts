@@ -1,86 +1,65 @@
-import * as Yup from "yup";
 import { Request, Response } from "express";
+import * as Yup from "yup";
 import { getIO } from "../libs/socket";
-
-import Contact from "../models/Contact";
-import ListContactsService from "../services/ContactServices/ListContactsService";
-import CreateContactService from "../services/ContactServices/CreateContactService";
-import ShowContactService from "../services/ContactServices/ShowContactService";
-import UpdateContactService from "../services/ContactServices/UpdateContactService";
-import DeleteContactService from "../services/ContactServices/DeleteContactService";
-import GetContactService from "../services/ContactServices/GetContactService";
-
-import CheckContactNumber from "../services/WbotServices/CheckNumber";
-import CheckIsValidContact from "../services/WbotServices/CheckIsValidContact";
-import GetProfilePicUrl from "../services/WbotServices/GetProfilePicUrl";
+import { queryCache } from "../libs/queryCache";
+import { databaseCircuitBreaker } from "../libs/circuitBreaker";
+import { metrics } from "../libs/metrics";
 import AppError from "../errors/AppError";
-import SimpleListService, {
-  SearchContactParams
-} from "../services/ContactServices/SimpleListService";
-import ContactCustomField from "../models/ContactCustomField";
-import {head} from "lodash";
-import {ImportContacts} from "../services/ContactServices/ImportContacts";
 
-type IndexQuery = {
-  searchParam: string;
-  pageNumber: string;
-};
+import CreateService from "../services/ContactServices/CreateService";
+import ListService from "../services/ContactServices/ListService";
+import ShowService from "../services/ContactServices/ShowService";
+import UpdateService from "../services/ContactServices/UpdateService";
+import DeleteService from "../services/ContactServices/DeleteService";
 
-type IndexGetContactQuery = {
-  name: string;
-  number: string;
-};
-
-interface ExtraInfo extends ContactCustomField {
-  name: string;
-  value: string;
-}
 interface ContactData {
   name: string;
   number: string;
   email?: string;
-  extraInfo?: ExtraInfo[];
+  condominio?: string;
+  endereco?: string;
+  cargo?: string;
+  extraInfo?: any[];
+}
+
+interface IndexQuery {
+  searchParam: string;
+  pageNumber: string;
+  companyId: string | number;
 }
 
 export const index = async (req: Request, res: Response): Promise<Response> => {
   const { searchParam, pageNumber } = req.query as IndexQuery;
   const { companyId } = req.user;
 
-  const { contacts, count, hasMore } = await ListContactsService({
-    searchParam,
-    pageNumber,
+  const cacheKey = `contacts:${companyId}:${searchParam || ""}:${pageNumber || 1}`;
+  
+  // Usar cache para consultas frequentes
+  const { records, count, hasMore } = await queryCache.getOrSet(
+    cacheKey,
+    async () => {
+      // Usar circuit breaker para operações de banco de dados
+      return await databaseCircuitBreaker.execute(async () => {
+        return await ListService({ searchParam, pageNumber, companyId });
+      });
+    },
+    60, // TTL de 1 minuto
     companyId
-  });
+  );
 
-  return res.json({ contacts, count, hasMore });
-};
-
-export const getContact = async (
-  req: Request,
-  res: Response
-): Promise<Response> => {
-  const { name, number } = req.body as IndexGetContactQuery;
-  const { companyId } = req.user;
-
-  const contact = await GetContactService({
-    name,
-    number,
-    companyId
-  });
-
-  return res.status(200).json(contact);
+  return res.json({ records, count, hasMore });
 };
 
 export const store = async (req: Request, res: Response): Promise<Response> => {
   const { companyId } = req.user;
   const newContact: ContactData = req.body;
-  newContact.number = newContact.number.replace("-", "").replace(" ", "");
-
   const schema = Yup.object().shape({
     name: Yup.string().required(),
-    /*number: Yup.string()
-      .required()
-      .matches(/^\d+$/, "Invalid number format. Only numbers is allowed.")*/
+    number: Yup.string().required(),
+    email: Yup.string().email().nullable(),
+    condominio: Yup.string().nullable(),
+    endereco: Yup.string().nullable(),
+    cargo: Yup.string().nullable()
   });
 
   try {
@@ -89,37 +68,30 @@ export const store = async (req: Request, res: Response): Promise<Response> => {
     throw new AppError(err.message);
   }
 
-  await CheckIsValidContact(newContact.number, companyId);
-  const validNumber = await CheckContactNumber(newContact.number, companyId);
-  const number = validNumber.jid.replace(/\D/g, "");
-  newContact.number = number;
+  // Registrar métricas de uso
+  const startTime = Date.now();
 
-    // Check if the contact already exists
-    const existingContact = await Contact.findOne({
-      where: {
-        number: newContact.number,
-        companyId
-      }
+  // Usar circuit breaker para operações de banco de dados
+  const contact = await databaseCircuitBreaker.execute(async () => {
+    return await CreateService({
+      ...newContact,
+      companyId
     });
-    
-    if (existingContact) {
-      // Contact already exists, send the existing contact data as the response
-      return res.status(200).json({ alreadyExists: true, existingContact });
-    }
+  });
 
-  /**
-   * Código desabilitado por demora no retorno
-   */
-  // const profilePicUrl = await GetProfilePicUrl(validNumber.jid, companyId);
+  // Invalidar cache relacionado a contatos
+  await queryCache.invalidatePattern(`contacts:${companyId}:*`);
 
-  const contact = await CreateContactService({
-    ...newContact,
-    // profilePicUrl,
+  // Registrar tempo de execução
+  const executionTime = Date.now() - startTime;
+  metrics.emit('operation', { 
+    type: 'contact_create', 
+    executionTime,
     companyId
   });
 
   const io = getIO();
-  io.to(`company-${companyId}-mainchannel`).emit(`company-${companyId}-contact`, {
+  io.to(`company-${companyId}-contact`).emit(`company-${companyId}-contact`, {
     action: "create",
     contact
   });
@@ -128,27 +100,38 @@ export const store = async (req: Request, res: Response): Promise<Response> => {
 };
 
 export const show = async (req: Request, res: Response): Promise<Response> => {
-  const { contactId } = req.params;
+  const { id } = req.params;
   const { companyId } = req.user;
 
-  const contact = await ShowContactService(contactId, companyId);
+  const cacheKey = `contact:${id}`;
+  
+  // Usar cache para consultas frequentes
+  const contact = await queryCache.getOrSet(
+    cacheKey,
+    async () => {
+      // Usar circuit breaker para operações de banco de dados
+      return await databaseCircuitBreaker.execute(async () => {
+        return await ShowService(id, companyId);
+      });
+    },
+    300, // TTL de 5 minutos
+    companyId
+  );
 
   return res.status(200).json(contact);
 };
 
-export const update = async (
-  req: Request,
-  res: Response
-): Promise<Response> => {
+export const update = async (req: Request, res: Response): Promise<Response> => {
   const contactData: ContactData = req.body;
   const { companyId } = req.user;
 
   const schema = Yup.object().shape({
     name: Yup.string(),
-    /*number: Yup.string().matches(
-      /^\d+$/,
-      "Invalid number format. Only numbers is allowed."
-    )*/
+    number: Yup.string(),
+    email: Yup.string().email().nullable(),
+    condominio: Yup.string().nullable(),
+    endereco: Yup.string().nullable(),
+    cargo: Yup.string().nullable()
   });
 
   try {
@@ -157,21 +140,23 @@ export const update = async (
     throw new AppError(err.message);
   }
 
-  /*await CheckIsValidContact(contactData.number, companyId);
-  const validNumber = await CheckContactNumber(contactData.number, companyId);
-  const number = validNumber.jid.replace(/\D/g, "");
-  contactData.number = number;
-*/
-  const { contactId } = req.params;
+  const { id } = req.params;
 
-  const contact = await UpdateContactService({
-    contactData,
-    contactId,
-    companyId
+  // Usar circuit breaker para operações de banco de dados
+  const contact = await databaseCircuitBreaker.execute(async () => {
+    return await UpdateService({
+      ...contactData,
+      id: +id,
+      companyId
+    });
   });
 
+  // Invalidar cache relacionado ao contato
+  await queryCache.invalidate(`contact:${id}`, companyId);
+  await queryCache.invalidatePattern(`contacts:${companyId}:*`);
+
   const io = getIO();
-  io.to(`company-${companyId}-mainchannel`).emit(`company-${companyId}-contact`, {
+  io.to(`company-${companyId}-contact`).emit(`company-${companyId}-contact`, {
     action: "update",
     contact
   });
@@ -179,81 +164,24 @@ export const update = async (
   return res.status(200).json(contact);
 };
 
-export const remove = async (
-  req: Request,
-  res: Response
-): Promise<Response> => {
-  const { contactId } = req.params;
+export const remove = async (req: Request, res: Response): Promise<Response> => {
+  const { id } = req.params;
   const { companyId } = req.user;
 
-  await ShowContactService(contactId, companyId);
+  // Usar circuit breaker para operações de banco de dados
+  await databaseCircuitBreaker.execute(async () => {
+    await DeleteService(id, companyId);
+  });
 
-  await DeleteContactService(contactId);
+  // Invalidar cache relacionado ao contato
+  await queryCache.invalidate(`contact:${id}`, companyId);
+  await queryCache.invalidatePattern(`contacts:${companyId}:*`);
 
   const io = getIO();
-  io.to(`company-${companyId}-mainchannel`).emit(`company-${companyId}-contact`, {
+  io.to(`company-${companyId}-contact`).emit(`company-${companyId}-contact`, {
     action: "delete",
-    contactId
+    contactId: +id
   });
 
   return res.status(200).json({ message: "Contact deleted" });
-};
-
-export const list = async (req: Request, res: Response): Promise<Response> => {
-  const { name } = req.query as unknown as SearchContactParams;
-  const { companyId } = req.user;
-
-  const contacts = await SimpleListService({ name, companyId });
-
-  return res.json(contacts);
-};
-
-export const upload = async (req: Request, res: Response) => {
-  const files = req.files as Express.Multer.File[];
-  const file: Express.Multer.File = head(files) as Express.Multer.File;
-  const { companyId } = req.user;
-
-  const response = await ImportContacts(companyId, file);
-
-  const io = getIO();
-
-  io.to(`company-${companyId}-mainchannel`).emit(`company-${companyId}-contact`, {
-    action: "create",
-    records: response
-  });
-
-  return res.status(200).json(response);
-};
-
-export const getContactVcard = async (
-  req: Request,
-  res: Response
-): Promise<Response> => {
-  const { name, number } = req.query as IndexGetContactQuery;
-  const { companyId } = req.user;
-
-  let vNumber = number;
-  const numberDDI = vNumber.toString().substr(0, 2);
-  const numberDDD = vNumber.toString().substr(2, 2);
-  const numberUser = vNumber.toString().substr(-8, 8);
-
-  if (numberDDD <= '30' && numberDDI === '55') {
-    console.log("menor 30")
-    vNumber = `${numberDDI + numberDDD + 9 + numberUser}@s.whatsapp.net`;
-  } else if (numberDDD > '30' && numberDDI === '55') {
-    console.log("maior 30")
-    vNumber = `${numberDDI + numberDDD + numberUser}@s.whatsapp.net`;
-  } else {
-    vNumber = `${number}@s.whatsapp.net`;
-  }
-
-  console.log(vNumber);
-
-  const contact = await GetContactService({
-    name,
-    number,
-    companyId
-  });
-
-  return res.status(200).json(contact);
 };

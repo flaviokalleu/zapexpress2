@@ -39,6 +39,22 @@ class Contact extends Model<Contact> {
   @Column
   email: string;
 
+  // Novos campos adicionados
+  @AllowNull(true)
+  @Default("")
+  @Column
+  condominio: string;
+
+  @AllowNull(true)
+  @Default("")
+  @Column
+  endereco: string;
+
+  @AllowNull(true)
+  @Default("")
+  @Column
+  cargo: string;
+
   @Default("")
   @Column
   profilePicUrl: string;
