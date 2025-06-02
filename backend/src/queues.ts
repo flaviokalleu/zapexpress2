@@ -988,6 +988,8 @@ export async function startQueueProcess() {
 
   campaignQueue.process("ProcessCampaign", handleProcessCampaign);
 
+  campaignQueue.process("processBatch", handleProcessBatch);
+
   campaignQueue.process("PrepareContact", handlePrepareContact);
 
   campaignQueue.process("DispatchCampaign", handleDispatchCampaign);
