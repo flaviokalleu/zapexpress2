@@ -26,7 +26,7 @@ const App = () => {
     const preferredTheme = window.localStorage.getItem("preferredTheme");
     const [mode, setMode] = useState(preferredTheme ? preferredTheme : prefersDarkMode ? "dark" : "light");
 
-    const [systemTitle, setSystemTitle] = useState("ZAPXPRESS"); // Valor padrão
+    const [systemTitle, setSystemTitle] = useState("IDE+ COMERCIAL"); // Valor padrão
 
       useEffect(() => {
         async function fetchSystemTitle() {
