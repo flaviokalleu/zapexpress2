@@ -527,27 +527,62 @@ export function randomValue(min: number, max: number) {
 }
 
 async function verifyAndFinalizeCampaign(campaign: any) {
-  const { contacts } = campaign.contactList;
+  try {
+    // Busca a campanha atualizada com a lista de contatos
+    const updatedCampaign = await Campaign.findByPk(campaign.id, {
+      include: [
+        {
+          model: ContactList,
+          as: "contactList",
+          include: [
+            {
+              model: ContactListItem,
+              as: "contacts",
+              where: { isWhatsappValid: true }
+            }
+          ]
+        }
+      ]
+    });
 
-  const count1 = contacts.length;
-  const count2 = await CampaignShipping.count({
-    where: {
-      campaignId: campaign.id,
-      deliveredAt: {
-        [Op.not]: undefined
-      }
+    if (!updatedCampaign) {
+      logger.error(`Campanha não encontrada: ${campaign.id}`);
+      return;
     }
-  });
 
-  if (count1 === count2) {
-    await campaign.update({ status: "FINALIZADA", completedAt: moment() });
+    const validContacts = updatedCampaign.contactList.contacts.length;
+    
+    // Conta quantas mensagens foram entregues
+    const deliveredCount = await CampaignShipping.count({
+      where: {
+        campaignId: campaign.id,
+        deliveredAt: {
+          [Op.not]: null
+        }
+      }
+    });
+
+    logger.info(`Campanha ${campaign.id}: ${deliveredCount}/${validContacts} mensagens entregues`);
+
+    // Se todas as mensagens foram entregues, finaliza a campanha
+    if (validContacts > 0 && deliveredCount >= validContacts) {
+      await updatedCampaign.update({ 
+        status: "FINALIZADA", 
+        completedAt: moment() 
+      });
+
+      logger.info(`Campanha ${campaign.id} finalizada com sucesso`);
+
+      const io = getIO();
+      io.to(`company-${campaign.companyId}-mainchannel`).emit(`company-${campaign.companyId}-campaign`, {
+        action: "update",
+        record: updatedCampaign
+      });
+    }
+  } catch (err: any) {
+    Sentry.captureException(err);
+    logger.error(`Erro ao verificar finalização da campanha ${campaign.id}: ${err.message}`);
   }
-
-  const io = getIO();
-  io.to(`company-${campaign.companyId}-mainchannel`).emit(`company-${campaign.companyId}-campaign`, {
-    action: "update",
-    record: campaign
-  });
 }
 
 function calculateDelay(index: number, baseDelay: Date, longerIntervalAfter: number, greaterInterval: number, messageInterval: number) {
