@@ -27,7 +27,8 @@ import ShowFileService from "./services/FileServices/ShowService";
 import { getMessageOptions } from "./services/WbotServices/SendWhatsAppMedia";
 import { ClosedAllOpenTickets } from "./services/WbotServices/wbotClosedTickets";
 import { logger } from "./utils/logger";
-
+import { MetricsCollector } from "./utils/MetricsCollector";
+import { defaultQueueOptions, MessagePriority, queueConfigs, queueManager } from "./config/queueConfig";
 
 const nodemailer = require('nodemailer');
 const CronJob = require('cron').CronJob;
@@ -35,6 +36,7 @@ const CronJob = require('cron').CronJob;
 const connection = process.env.REDIS_URI || "";
 const limiterMax = process.env.REDIS_OPT_LIMITER_MAX || 1;
 const limiterDuration = process.env.REDIS_OPT_LIMITER_DURATION || 3000;
+const metrics = new MetricsCollector();
 
 interface ProcessCampaignData {
   id: number;
@@ -54,26 +56,27 @@ interface DispatchCampaignData {
   contactListItemId: number;
 }
 
-export const userMonitor = new BullQueue("UserMonitor", connection);
-
-export const queueMonitor = new BullQueue("QueueMonitor", connection);
-
+export const userMonitor = new BullQueue("UserMonitor", connection, defaultQueueOptions);
+export const queueMonitor = new BullQueue("QueueMonitor", connection, defaultQueueOptions);
 export const messageQueue = new BullQueue("MessageQueue", connection, {
+  ...defaultQueueOptions,
   limiter: {
-    max: limiterMax as number,
-    duration: limiterDuration as number
+    max: queueManager.maxConcurrentJobs,
+    duration: 1000
   }
 });
-
-export const scheduleMonitor = new BullQueue("ScheduleMonitor", connection);
+export const scheduleMonitor = new BullQueue("ScheduleMonitor", connection, defaultQueueOptions);
 export const sendScheduledMessages = new BullQueue(
-  "SendSacheduledMessages",
-  connection
+  "SendScheduledMessages",
+  connection,
+  defaultQueueOptions
 );
+export const campaignQueue = new BullQueue("CampaignQueue", connection, {
+  ...defaultQueueOptions,
+  ...queueConfigs.campaignProcessor
+});
 
-export const campaignQueue = new BullQueue("CampaignQueue", connection);
-
-async function handleSendMessage(job) {
+async function handleSendMessage(job: any) {
   try {
     const { data } = job;
 
@@ -216,7 +219,7 @@ async function handleCloseTicketsAutomatic() {
   job.start()
 }
 
-async function handleVerifySchedules(job) {
+async function handleVerifySchedules(job: any) {
   try {
     const { count, rows: schedules } = await Schedule.findAndCountAll({
       where: {
@@ -249,7 +252,7 @@ async function handleVerifySchedules(job) {
   }
 }
 
-async function handleSendScheduledMessage(job) {
+async function handleSendScheduledMessage(job: any) {
   const {
     data: { schedule }
   } = job;
@@ -278,7 +281,7 @@ async function handleSendScheduledMessage(job) {
     await SendMessage(whatsapp, {
       number: schedule.contact.number,
       body: formatBody(schedule.body, schedule.contact),
-      mediaPath: filePath
+      mediaPath: filePath || undefined
     });
 
     await scheduleRecord?.update({
@@ -298,7 +301,7 @@ async function handleSendScheduledMessage(job) {
   }
 }
 
-async function handleVerifyCampaigns(job) {
+async function handleVerifyCampaigns(job: any) {
   /**
    * @todo
    * Implementar filtro de campanhas
@@ -337,7 +340,7 @@ async function handleVerifyCampaigns(job) {
   }
 }
 
-async function getCampaign(id) {
+async function getCampaign(id: number) {
   return await Campaign.findByPk(id, {
     include: [
       {
@@ -367,13 +370,13 @@ async function getCampaign(id) {
   });
 }
 
-async function getContact(id) {
+async function getContact(id: number) {
   return await ContactListItem.findByPk(id, {
     attributes: ["id", "name", "number", "email"]
   });
 }
 
-async function getSettings(campaign) {
+async function getSettings(campaign: any) {
   const settings = await CampaignSetting.findAll({
     where: { companyId: campaign.companyId },
     attributes: ["key", "value"]
@@ -407,11 +410,11 @@ async function getSettings(campaign) {
   };
 }
 
-export function parseToMilliseconds(seconds) {
+export function parseToMilliseconds(seconds: number) {
   return seconds * 1000;
 }
 
-async function sleep(seconds) {
+async function sleep(seconds: number) {
   logger.info(
     `Sleep de ${seconds} segundos iniciado: ${moment().format("HH:mm:ss")}`
   );
@@ -427,7 +430,7 @@ async function sleep(seconds) {
   });
 }
 
-function getCampaignValidMessages(campaign) {
+function getCampaignValidMessages(campaign: any) {
   const messages = [];
 
   if (!isEmpty(campaign.message1) && !isNil(campaign.message1)) {
@@ -453,7 +456,7 @@ function getCampaignValidMessages(campaign) {
   return messages;
 }
 
-function getCampaignValidConfirmationMessages(campaign) {
+function getCampaignValidConfirmationMessages(campaign: any) {
   const messages = [];
 
   if (
@@ -519,11 +522,11 @@ function getProcessedMessage(msg: string, variables: any[], contact: any) {
   return finalMessage;
 }
 
-export function randomValue(min, max) {
+export function randomValue(min: number, max: number) {
   return Math.floor(Math.random() * max) + min;
 }
 
-async function verifyAndFinalizeCampaign(campaign) {
+async function verifyAndFinalizeCampaign(campaign: any) {
   const { contacts } = campaign.contactList;
 
   const count1 = contacts.length;
@@ -531,7 +534,7 @@ async function verifyAndFinalizeCampaign(campaign) {
     where: {
       campaignId: campaign.id,
       deliveredAt: {
-        [Op.not]: null
+        [Op.not]: undefined
       }
     }
   });
@@ -547,7 +550,7 @@ async function verifyAndFinalizeCampaign(campaign) {
   });
 }
 
-function calculateDelay(index, baseDelay, longerIntervalAfter, greaterInterval, messageInterval) {
+function calculateDelay(index: number, baseDelay: Date, longerIntervalAfter: number, greaterInterval: number, messageInterval: number) {
   const diffSeconds = differenceInSeconds(baseDelay, new Date());
   if (index > longerIntervalAfter) {
     return diffSeconds * 1000 + greaterInterval
@@ -556,52 +559,106 @@ function calculateDelay(index, baseDelay, longerIntervalAfter, greaterInterval, 
   }
 }
 
-async function handleProcessCampaign(job) {
+async function processCampaignInBatches(campaignId: number) {
   try {
-    const { id }: ProcessCampaignData = job.data;
-    const campaign = await getCampaign(id);
-    const settings = await getSettings(campaign);
-    if (campaign) {
-      const { contacts } = campaign.contactList;
-      if (isArray(contacts)) {
-        const contactData = contacts.map(contact => ({
-          contactId: contact.id,
-          campaignId: campaign.id,
-          variables: settings.variables,
-        }));
+    const campaign = await getCampaign(campaignId);
+    if (!campaign) return;
 
-        // const baseDelay = job.data.delay || 0;
-        const longerIntervalAfter = parseToMilliseconds(settings.longerIntervalAfter);
-        const greaterInterval = parseToMilliseconds(settings.greaterInterval);
-        const messageInterval = settings.messageInterval;
+    const { contacts } = campaign.contactList;
+    if (!isArray(contacts)) return;
 
-        let baseDelay = campaign.scheduledAt;
+    const batchSize = queueManager.batchSize;
+    const totalBatches = Math.ceil(contacts.length / batchSize);
 
-        const queuePromises = [];
-        for (let i = 0; i < contactData.length; i++) {
-          baseDelay = addSeconds(baseDelay, i > longerIntervalAfter ? greaterInterval : messageInterval);
+    for (let i = 0; i < totalBatches; i++) {
+      const start = i * batchSize;
+      const end = Math.min(start + batchSize, contacts.length);
+      const batchContacts = contacts.slice(start, end);
 
-          const { contactId, campaignId, variables } = contactData[i];
-          const delay = calculateDelay(i, baseDelay, longerIntervalAfter, greaterInterval, messageInterval);
-          const queuePromise = campaignQueue.add(
-            "PrepareContact",
-            { contactId, campaignId, variables, delay },
-            { removeOnComplete: true }
-          );
-          queuePromises.push(queuePromise);
-          logger.info(`Registro enviado pra fila de disparo: Campanha=${campaign.id};Contato=${contacts[i].name};delay=${delay}`);
+      await campaignQueue.add(
+        "processBatch",
+        {
+          campaignId,
+          contacts: batchContacts,
+          batchNumber: i,
+          totalBatches
+        },
+        {
+          priority: MessagePriority.MEDIUM,
+          attempts: queueManager.retryStrategy.maxAttempts,
+          backoff: queueManager.retryStrategy.backoff
         }
-        await Promise.all(queuePromises);
-        await campaign.update({ status: "EM_ANDAMENTO" });
-      }
+      );
+
+      logger.info(`Batch ${i + 1}/${totalBatches} added to queue for campaign ${campaignId}`);
     }
+
+    await campaign.update({ status: "EM_ANDAMENTO" });
   } catch (err: any) {
     Sentry.captureException(err);
+    metrics.recordError(err);
+    logger.error(`Error processing campaign in batches: ${err.message}`);
+  }
+}
+
+async function handleProcessBatch(job: any) {
+  try {
+    const { campaignId, contacts, batchNumber, totalBatches } = job.data;
+    const campaign = await getCampaign(campaignId);
+    const settings = await getSettings(campaign);
+
+    const baseDelay = campaign?.scheduledAt;
+    const longerIntervalAfter = parseToMilliseconds(settings.longerIntervalAfter);
+    const greaterInterval = parseToMilliseconds(settings.greaterInterval);
+    const messageInterval = settings.messageInterval;
+
+    const queuePromises = contacts.map((contact: any, index: number) => {
+      const delay = calculateDelay(
+        batchNumber * queueManager.batchSize + index,
+        baseDelay || new Date(),
+        longerIntervalAfter,
+        greaterInterval,
+        messageInterval
+      );
+
+      return campaignQueue.add(
+        "PrepareContact",
+        {
+          contactId: contact.id,
+          campaignId,
+          variables: settings.variables,
+          delay
+        },
+        {
+          priority: MessagePriority.MEDIUM,
+          removeOnComplete: true
+        }
+      );
+    });
+
+    await Promise.all(queuePromises);
+    metrics.increment('batches_processed');
+    logger.info(`Batch ${batchNumber + 1}/${totalBatches} processed for campaign ${campaignId}`);
+  } catch (err: any) {
+    Sentry.captureException(err);
+    metrics.recordError(err);
+    logger.error(`Error processing batch: ${err.message}`);
+  }
+}
+
+async function handleProcessCampaign(job: any) {
+  try {
+    const { id }: ProcessCampaignData = job.data;
+    await processCampaignInBatches(id);
+  } catch (err: any) {
+    Sentry.captureException(err);
+    metrics.recordError(err);
+    logger.error(`Error in handleProcessCampaign: ${err.message}`);
   }
 }
 
 let ultima_msg = 0;
-async function handlePrepareContact(job) {
+async function handlePrepareContact(job: any) {
   try {
     const { contactId, campaignId, delay, variables }: PrepareContactData =
       job.data;
@@ -609,7 +666,7 @@ async function handlePrepareContact(job) {
     const contact = await getContact(contactId);
 
     const campaignShipping: any = {};
-    campaignShipping.number = contact.number;
+    campaignShipping.number = contact?.number;
     campaignShipping.contactId = contactId;
     campaignShipping.campaignId = campaignId;
 
@@ -629,7 +686,7 @@ async function handlePrepareContact(job) {
       campaignShipping.message = `\u200c ${message}`;
     }
 
-    if (campaign.confirmation) {
+    if (campaign?.confirmation) {
       const confirmationMessages =
         getCampaignValidConfirmationMessages(campaign);
       if (confirmationMessages.length) {
@@ -667,7 +724,7 @@ async function handlePrepareContact(job) {
       const nextJob = await campaignQueue.add(
         "DispatchCampaign",
         {
-          campaignId: campaign.id,
+          campaignId: campaign?.id,
           campaignShippingId: record.id,
           contactListItemId: contactId
         },
@@ -686,19 +743,19 @@ async function handlePrepareContact(job) {
   }
 }
 
-async function handleDispatchCampaign(job) {
+async function handleDispatchCampaign(job: any) {
   try {
     const { data } = job;
     const { campaignShippingId, campaignId }: DispatchCampaignData = data;
     const campaign = await getCampaign(campaignId);
-    const wbot = await GetWhatsappWbot(campaign.whatsapp);
+    const wbot = await GetWhatsappWbot(campaign?.whatsapp!);
 
     if (!wbot) {
       logger.error(`campaignQueue -> DispatchCampaign -> error: wbot not found`);
       return;
     }
 
-    if (!campaign.whatsapp) {
+    if (!campaign?.whatsapp) {
       logger.error(`campaignQueue -> DispatchCampaign -> error: whatsapp not found`);
       return;
     }
@@ -719,23 +776,23 @@ async function handleDispatchCampaign(job) {
       }
     );
 
-    const chatId = `${campaignShipping.number}@s.whatsapp.net`;
+    const chatId = `${campaignShipping?.number}@s.whatsapp.net`;
 
-    let body = campaignShipping.message;
+    let body = campaignShipping?.message;
 
-    if (campaign.confirmation && campaignShipping.confirmation === null) {
-      body = campaignShipping.confirmationMessage
+    if (campaign?.confirmation && campaignShipping?.confirmation === null) {
+      body = campaignShipping?.confirmationMessage
     }
 
-    if (!isNil(campaign.fileListId)) {
+    if (!isNil(campaign?.fileListId)) {
       try {
         const publicFolder = path.resolve(__dirname, "..", "public");
-        const files = await ShowFileService(campaign.fileListId, campaign.companyId)
-        const folder = path.resolve(publicFolder, `company${campaign.companyId}`,"fileList", String(files.id))
+        const files = await ShowFileService(campaign?.fileListId!, campaign?.companyId!)
+        const folder = path.resolve(publicFolder, `company${campaign?.companyId}`,"fileList", String(files.id))
         for (const [index, file] of files.options.entries()) {
           /*const options = await getMessageOptions(file.path, path.resolve(folder, file.path), file.name);*/
 
-          const options = await getMessageOptions(file.name, path.resolve(folder, file.path), String(campaign.companyId), body);
+          const options = await getMessageOptions(file.name, path.resolve(folder, file.path), String(campaign?.companyId!), body);
           await wbot.sendMessage(chatId, { ...options });
         };
       } catch (error) {
@@ -743,13 +800,13 @@ async function handleDispatchCampaign(job) {
       }
     }
 
-    if (campaign.mediaPath) {
+    if (campaign?.mediaPath) {
             const publicFolder = path.resolve(__dirname, "..", "public");
-            const filePath = path.join(publicFolder, `company${campaign.companyId}`, campaign.mediaPath);
+            const filePath = path.join(publicFolder, `company${campaign?.companyId}`, campaign?.mediaPath);
 
             console.log("queues.ts -> Body antes de getMessageOptions:", body); // Verifica se o texto está aqui
       
-      const options = await getMessageOptions(campaign.mediaPath, filePath, String(campaign.companyId), body);            
+      const options = await getMessageOptions(campaign?.mediaPath!, filePath, String(campaign?.companyId!), body);            
       console.log("Options retornadas:", options); // Verifica se o caption está no options
       
       if (Object.keys(options).length) {
@@ -757,19 +814,19 @@ async function handleDispatchCampaign(job) {
       }
     }
     else {
-      if (campaign.confirmation && campaignShipping.confirmation === null) {
+      if (campaign?.confirmation && campaignShipping?.confirmation === null) {
         await wbot.sendMessage(chatId, {
-          text: body
+          text: body || ""
         });
-        await campaignShipping.update({ confirmationRequestedAt: moment() });
+        await campaignShipping?.update({ confirmationRequestedAt: moment() });
       } else {
 
         await wbot.sendMessage(chatId, {
-          text: body
+          text: body || ""
         });
       }
     }
-    await campaignShipping.update({ deliveredAt: moment() });
+    await campaignShipping?.update({ deliveredAt: moment() });
 
     await verifyAndFinalizeCampaign(campaign);
 
@@ -780,7 +837,7 @@ async function handleDispatchCampaign(job) {
     });
 
     logger.info(
-      `Campanha enviada para: Campanha=${campaignId};Contato=${campaignShipping.contact.name}`
+      `Campanha enviada para: Campanha=${campaignId};Contato=${campaignShipping?.contact?.name}`
     );
   } catch (err: any) {
     Sentry.captureException(err);
@@ -789,7 +846,7 @@ async function handleDispatchCampaign(job) {
   }
 }
 
-async function handleLoginStatus(job) {
+async function handleLoginStatus(job: any) {
   const users: { id: number }[] = await sequelize.query(
     `select id from "Users" where "updatedAt" < now() - '5 minutes'::interval and online = true`,
     { type: QueryTypes.SELECT }
@@ -797,7 +854,7 @@ async function handleLoginStatus(job) {
   for (let item of users) {
     try {
       const user = await User.findByPk(item.id);
-      await user.update({ online: false });
+      await user!.update({ online: false });
       logger.info(`Usuário passado para offline: ${item.id}`);
     } catch (e: any) {
       Sentry.captureException(e);
@@ -806,7 +863,7 @@ async function handleLoginStatus(job) {
 }
 
 
-async function handleInvoiceCreate() {
+  async function handleInvoiceCreate() {
   logger.info("GERENDO RECEITA...");
   const job = new CronJob('*/5 * * * * *', async () => {
     const companies = await Company.findAll();
@@ -883,7 +940,7 @@ async function handleInvoiceCreate() {
           } else {
           
             const sql = `INSERT INTO "Invoices" (detail, status, value, "updatedAt", "createdAt", "dueDate", "companyId")
-            VALUES ('${plan.name}', 'open', '${plan.value}', '${timestamp}', '${timestamp}', '${date}', ${c.id});`
+            VALUES ('${plan?.name}', 'open', '${plan?.value}', '${timestamp}', '${timestamp}', '${date}', ${c.id});`
 
             const invoiceInsert = await sequelize.query(sql, { type: QueryTypes.INSERT });
         
@@ -976,4 +1033,24 @@ export async function startQueueProcess() {
       removeOnComplete: true
     }
   );
+
+  messageQueue.on('completed', (job) => {
+    metrics.increment('messages_sent');
+    metrics.recordLatency('message_processing', job.processedOn! - job.timestamp);
+  });
+
+  messageQueue.on('failed', (job, err) => {
+    metrics.increment('messages_failed');
+    metrics.recordError(err);
+  });
+
+  campaignQueue.on('completed', (job) => {
+    metrics.increment('campaign_jobs_completed');
+    metrics.recordLatency('campaign_processing', job.processedOn! - job.timestamp);
+  });
+
+  campaignQueue.on('failed', (job, err) => {
+    metrics.increment('campaign_jobs_failed');
+    metrics.recordError(err);
+  });
 }
