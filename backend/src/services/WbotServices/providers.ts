@@ -11,6 +11,8 @@ import axios from 'axios';
 import UpdateTicketService from "../TicketServices/UpdateTicketService";
 import fs from 'fs';
 
+const btoa = (str: string) => Buffer.from(str).toString('base64');
+
 export const provider = async (ticket: Ticket, msg: proto.IWebMessageInfo, companyId: number, contact: Contact, wbot: WASocket) => {
   const filaescolhida = ticket.queue?.name
   if (filaescolhida === "2ª Via de Boleto" || filaescolhida === "2 Via de Boleto") {
@@ -1180,8 +1182,6 @@ export const provider = async (ticket: Ticket, msg: proto.IWebMessageInfo, compa
           }
         }
       }
-
-
     }
   }
 

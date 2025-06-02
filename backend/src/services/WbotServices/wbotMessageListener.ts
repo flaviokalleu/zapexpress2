@@ -2592,15 +2592,14 @@ const verifyCampaignMessageAndCloseTicket = async (
 const filterMessages = (msg: WAMessage): boolean => {
   if (msg.message?.protocolMessage) return false;
 
-  if (
-    [
-      WAMessageStubType.REVOKE,
-      WAMessageStubType.E2E_DEVICE_CHANGED,
-      WAMessageStubType.E2E_IDENTITY_CHANGED,
-      WAMessageStubType.CIPHERTEXT
-    ].includes(msg.messageStubType as WAMessageStubType)
-  )
+  const stubTypes = [
+    WAMessageStubType.E2E_IDENTITY_CHANGED,
+    WAMessageStubType.CIPHERTEXT
+  ];
+  
+  if (msg.messageStubType && stubTypes.includes(msg.messageStubType)) {
     return false;
+  }
 
   return true;
 };

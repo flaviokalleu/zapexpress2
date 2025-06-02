@@ -4,14 +4,19 @@ import makeWASocket, {
   Browsers,
   WAMessage,
   DisconnectReason,
+  useMultiFileAuthState,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
-  makeInMemoryStore,
+  jidDecode,
+  isJidGroup,
   isJidBroadcast,
+  isJidUser,
+  isJidStatusBroadcast,
+  delay,
   WAMessageKey,
-  jidNormalizedUser,
-  CacheStore
+  jidNormalizedUser
 } from "@whiskeysockets/baileys";
+import makeInMemoryStore from "@whiskeysockets/baileys/lib/Store/make-in-memory-store";
 import { Op } from "sequelize";
 import { FindOptions } from "sequelize/types";
 import Whatsapp from "../models/Whatsapp";
@@ -166,8 +171,7 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
 
         const { state, saveState } = await authState(whatsapp);
 
-        //const msgRetryCounterCache = new NodeCache();
-        const userDevicesCache: CacheStore = new NodeCache();
+        const userDevicesCache = new NodeCache();
 
         wsocket = makeWASocket({
           logger: loggerBaileys,
@@ -177,50 +181,18 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
             keys: makeCacheableSignalKeyStore(state.keys, logger),
           },
           version,
-		  browser: Browsers.appropriate("Desktop"),
+          browser: Browsers.appropriate("Desktop"),
           defaultQueryTimeoutMs: undefined,
           msgRetryCounterCache,
-		  markOnlineOnConnect: false,
-		  connectTimeoutMs: 25_000,
-		  retryRequestDelayMs: 500,
-		  getMessage: msgDB.get,
-		  emitOwnEvents: true,
+          markOnlineOnConnect: false,
+          connectTimeoutMs: 25_000,
+          retryRequestDelayMs: 500,
+          getMessage: msgDB.get,
+          emitOwnEvents: true,
           fireInitQueries: true,
-		  transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },
+          transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 },
           shouldIgnoreJid: jid => isJidBroadcast(jid),
         });
-
-        // wsocket = makeWASocket({
-        //   version,
-        //   logger: loggerBaileys,
-        //   printQRInTerminal: false,
-        //   auth: state as AuthenticationState,
-        //   generateHighQualityLinkPreview: false,
-        //   shouldIgnoreJid: jid => isJidBroadcast(jid),
-        //   browser: ["Chat", "Chrome", "10.15.7"],
-        //   patchMessageBeforeSending: (message) => {
-        //     const requiresPatch = !!(
-        //       message.buttonsMessage ||
-        //       // || message.templateMessage
-        //       message.listMessage
-        //     );
-        //     if (requiresPatch) {
-        //       message = {
-        //         viewOnceMessage: {
-        //           message: {
-        //             messageContextInfo: {
-        //               deviceListMetadataVersion: 2,
-        //               deviceListMetadata: {},
-        //             },
-        //             ...message,
-        //           },
-        //         },
-        //       };
-        //     }
-
-        //     return message;
-        //   },
-        // })
 
         wsocket.ev.on(
           "connection.update",
