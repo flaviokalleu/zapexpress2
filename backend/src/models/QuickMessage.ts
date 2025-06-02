@@ -7,7 +7,8 @@ import {
   PrimaryKey,
   ForeignKey,
   BelongsTo,
-  AutoIncrement
+  AutoIncrement,
+  DataType
 } from "sequelize-typescript";
 
 import Company from "./Company";
@@ -49,15 +50,19 @@ class QuickMessage extends Model<QuickMessage> {
   @UpdatedAt
   updatedAt: Date;
 
-  @Column
-  get mediaPath(): string | null {
-    if (this.getDataValue("mediaPath") && this.getDataValue("companyId")) {
-
-      return `${process.env.BACKEND_URL}${process.env.PROXY_PORT ?`:${process.env.PROXY_PORT}`:""}/public/company${this.getDataValue("companyId")}/quick/${this.getDataValue("mediaPath")}`;
-
+  @Column({
+    type: DataType.STRING,
+    get() {
+      const rawMediaPath = (this as any).getDataValue('mediaPath');
+      const rawCompanyId = (this as any).getDataValue('companyId');
+      
+      if (rawMediaPath && rawCompanyId) {
+        return `${process.env.BACKEND_URL}${process.env.PROXY_PORT ?`:${process.env.PROXY_PORT}`:""}/public/company${rawCompanyId}/quick/${rawMediaPath}`;
+      }
+      return null;
     }
-    return null;
-  }
+  })
+  mediaPath: string | null;
   
   @Column
   mediaName: string;
