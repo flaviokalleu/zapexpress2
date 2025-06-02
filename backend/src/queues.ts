@@ -608,20 +608,26 @@ async function handleProcessBatch(job: any) {
     const settings = await getSettings(campaign);
 
     const baseDelay = campaign?.scheduledAt;
-    const longerIntervalAfter = parseToMilliseconds(settings.longerIntervalAfter);
-    const greaterInterval = parseToMilliseconds(settings.greaterInterval);
+    const longerIntervalAfter = settings.longerIntervalAfter;
+    const greaterInterval = settings.greaterInterval;
     const messageInterval = settings.messageInterval;
 
-    const queuePromises = contacts.map((contact: any, index: number) => {
+    // Processa os contatos sequencialmente
+    for (let i = 0; i < contacts.length; i++) {
+      const contact = contacts[i];
+      const index = batchNumber * queueManager.batchSize + i;
+      
+      // Calcula o delay baseado no índice e configurações
       const delay = calculateDelay(
-        batchNumber * queueManager.batchSize + index,
+        index,
         baseDelay || new Date(),
         longerIntervalAfter,
         greaterInterval,
         messageInterval
       );
 
-      return campaignQueue.add(
+      // Adiciona o contato à fila com o delay calculado
+      await campaignQueue.add(
         "PrepareContact",
         {
           contactId: contact.id,
@@ -634,9 +640,20 @@ async function handleProcessBatch(job: any) {
           removeOnComplete: true
         }
       );
-    });
 
-    await Promise.all(queuePromises);
+      // Aguarda o intervalo configurado antes de processar o próximo contato
+      if (i < contacts.length - 1) {
+        const nextDelay = calculateDelay(
+          index + 1,
+          baseDelay || new Date(),
+          longerIntervalAfter,
+          greaterInterval,
+          messageInterval
+        );
+        await sleep(nextDelay / 1000); // Converte milissegundos para segundos
+      }
+    }
+
     metrics.increment('batches_processed');
     logger.info(`Batch ${batchNumber + 1}/${totalBatches} processed for campaign ${campaignId}`);
   } catch (err: any) {
