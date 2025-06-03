@@ -173,7 +173,7 @@ const Login = () => {
         {/* Caso queira texto, descomente aqui */}
         {/* <div className={classes.leftContent}>
           <Typography variant="h4" component="h1" gutterBottom>
-            ZapXpress: Seu Multiatendimento
+            IDE+ COMERCIAL: Seu Multiatendimento
           </Typography>
           <Typography variant="body1">
             Chatbots e redes sociais em um só lugar!

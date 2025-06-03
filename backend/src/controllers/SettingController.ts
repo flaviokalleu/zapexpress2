@@ -81,7 +81,7 @@ export const show = async (
 
   // Retorna valor padrão para system_title se não encontrado
   if (settingKey === "system_title" && !retornoData) {
-    return res.status(200).json({ key: "system_title", value: "ZapXpress", companyId });
+    return res.status(200).json({ key: "system_title", value: "IDE+ COMERCIAL", companyId });
   }
 
   return res.status(200).json(retornoData);

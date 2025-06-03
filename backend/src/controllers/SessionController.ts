@@ -50,7 +50,7 @@ export const store = async (req: Request, res: Response): Promise<Response> => {
     
 
     // Opcional: Verificar o hostname (domínio) retornado pelo reCAPTCHA
-    const expectedHostname = process.env.APP_HOSTNAME;// || "app.zapxpress.com.br"; // Use uma variável de ambiente ou domínio fixo
+    const expectedHostname = process.env.APP_HOSTNAME;// || "comercial.idemaisag.com.br"; // Use uma variável de ambiente ou domínio fixo
 
     console.log("Verificando hostname:", { expected: expectedHostname, received: hostname }); // LOG 5: Comparação de hostname
 
