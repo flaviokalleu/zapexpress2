@@ -32,7 +32,7 @@ const App = () => {
         async function fetchSystemTitle() {
           try {
             const { data } = await api.get("/settings/system_title");
-            setSystemTitle(data?.value || "ZapXpress");
+            setSystemTitle(data?.value || "IDE+ COMERCIAL");
           } catch (error) {
             toastError(error);
           }
