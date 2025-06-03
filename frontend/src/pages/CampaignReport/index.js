@@ -139,6 +139,8 @@ const CampaignReport = () => {
         return "Cancelada";
       case "FINALIZADA":
         return "Finalizada";
+      case "PARCIALMENTE_CONCLUÍDA":
+        return "Parcialmente Concluída";
       default:
         return val;
     }
@@ -155,7 +157,7 @@ const CampaignReport = () => {
       </MainHeader>
       <Paper className={classes.mainPaper} variant="outlined">
         <Typography variant="h6" component="h2">
-          Status: {formatStatus(campaign.status)} {delivered} de {validContacts}
+          Status: {formatStatus(campaign.status)} ({campaign.successRate?.toFixed(2)}% de sucesso)
         </Typography>
         <Grid spacing={2} container>
           <Grid xs={12} item>

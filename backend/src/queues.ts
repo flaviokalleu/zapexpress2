@@ -562,7 +562,16 @@ async function verifyAndFinalizeCampaign(campaign: any) {
       }
     });
 
-    logger.info(`Campanha ${campaign.id}: ${deliveredCount}/${validContacts} mensagens entregues`);
+    // Calcula a taxa de sucesso
+    const successRate = validContacts > 0 ? (deliveredCount / validContacts) * 100 : 0;
+    
+    // Atualiza a taxa de sucesso
+    await updatedCampaign.update({ 
+      successRate,
+      lastDeliveryAt: moment()
+    });
+
+    logger.info(`Campanha ${campaign.id}: ${deliveredCount}/${validContacts} mensagens entregues (${successRate.toFixed(2)}%)`);
 
     // Se todas as mensagens foram entregues, finaliza a campanha
     if (validContacts > 0 && deliveredCount >= validContacts) {
@@ -578,6 +587,28 @@ async function verifyAndFinalizeCampaign(campaign: any) {
         action: "update",
         record: updatedCampaign
       });
+    } 
+    // Se a taxa de sucesso for maior que 80% e não houver novas entregas por 24 horas
+    else if (successRate >= 80) {
+      const lastDelivery = moment(updatedCampaign.lastDeliveryAt);
+      const now = moment();
+      const hoursSinceLastDelivery = now.diff(lastDelivery, 'hours');
+
+      if (hoursSinceLastDelivery >= 24) {
+        await updatedCampaign.update({ 
+          status: "PARCIALMENTE_CONCLUÍDA",
+          completedAt: moment(),
+          timeoutAt: moment()
+        });
+
+        logger.info(`Campanha ${campaign.id} marcada como parcialmente concluída após ${hoursSinceLastDelivery} horas sem novas entregas`);
+
+        const io = getIO();
+        io.to(`company-${campaign.companyId}-mainchannel`).emit(`company-${campaign.companyId}-campaign`, {
+          action: "update",
+          record: updatedCampaign
+        });
+      }
     }
   } catch (err: any) {
     Sentry.captureException(err);
