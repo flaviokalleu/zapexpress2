@@ -588,20 +588,20 @@ async function verifyAndFinalizeCampaign(campaign: any) {
         record: updatedCampaign
       });
     } 
-    // Se a taxa de sucesso for maior que 80% e não houver novas entregas por 24 horas
+    // Se a taxa de sucesso for maior que 80% e não houver novas entregas por 10 minutos
     else if (successRate >= 80) {
       const lastDelivery = moment(updatedCampaign.lastDeliveryAt);
       const now = moment();
-      const hoursSinceLastDelivery = now.diff(lastDelivery, 'hours');
+      const minutesSinceLastDelivery = now.diff(lastDelivery, 'minutes');
 
-      if (hoursSinceLastDelivery >= 24) {
+      if (minutesSinceLastDelivery >= 10) {
         await updatedCampaign.update({ 
           status: "PARCIALMENTE_CONCLUÍDA",
           completedAt: moment(),
           timeoutAt: moment()
         });
 
-        logger.info(`Campanha ${campaign.id} marcada como parcialmente concluída após ${hoursSinceLastDelivery} horas sem novas entregas`);
+        logger.info(`Campanha ${campaign.id} marcada como parcialmente concluída após ${minutesSinceLastDelivery} minutos sem novas entregas`);
 
         const io = getIO();
         io.to(`company-${campaign.companyId}-mainchannel`).emit(`company-${campaign.companyId}-campaign`, {
