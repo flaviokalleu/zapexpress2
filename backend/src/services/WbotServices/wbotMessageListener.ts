@@ -2560,32 +2560,55 @@ const verifyCampaignMessageAndCloseTicket = async (
   message: proto.IWebMessageInfo,
   companyId: number
 ) => {
-  const io = getIO();
-  const body = getBodyMessage(message);
-  const isCampaign = /\u200c/.test(body);
-  if (message.key.fromMe && isCampaign) {
-    const messageRecord = await Message.findOne({
-      where: { id: message.key.id!, companyId },
-    });
-    const ticket = await Ticket.findByPk(messageRecord.ticketId);
-    await ticket.update({ status: "closed" });
-
-    io.to(`company-${ticket.companyId}-open`)
-      .to(`queue-${ticket.queueId}-open`)
-      .emit(`company-${ticket.companyId}-ticket`, {
-        action: "delete",
-        ticket,
-        ticketId: ticket.id,
+  try {
+    const io = getIO();
+    const body = getBodyMessage(message);
+    const isCampaign = /\u200c/.test(body);
+    
+    if (message.key.fromMe && isCampaign) {
+      const messageRecord = await Message.findOne({
+        where: { id: message.key.id!, companyId },
       });
 
-    io.to(`company-${ticket.companyId}-${ticket.status}`)
-      .to(`queue-${ticket.queueId}-${ticket.status}`)
-      .to(ticket.id.toString())
-      .emit(`company-${ticket.companyId}-ticket`, {
-        action: "update",
-        ticket,
-        ticketId: ticket.id,
-      });
+      if (!messageRecord) {
+        logger.warn(`Mensagem de campanha não encontrada: ${message.key.id}`);
+        return;
+      }
+
+      if (!messageRecord.ticketId) {
+        logger.warn(`Mensagem de campanha sem ticket associado: ${message.key.id}`);
+        return;
+      }
+
+      const ticket = await Ticket.findByPk(messageRecord.ticketId);
+      
+      if (!ticket) {
+        logger.warn(`Ticket não encontrado para a mensagem: ${messageRecord.ticketId}`);
+        return;
+      }
+
+      await ticket.update({ status: "closed" });
+
+      io.to(`company-${ticket.companyId}-open`)
+        .to(`queue-${ticket.queueId}-open`)
+        .emit(`company-${ticket.companyId}-ticket`, {
+          action: "delete",
+          ticket,
+          ticketId: ticket.id,
+        });
+
+      io.to(`company-${ticket.companyId}-${ticket.status}`)
+        .to(`queue-${ticket.queueId}-${ticket.status}`)
+        .to(ticket.id.toString())
+        .emit(`company-${ticket.companyId}-ticket`, {
+          action: "update",
+          ticket,
+          ticketId: ticket.id,
+        });
+    }
+  } catch (err) {
+    Sentry.captureException(err);
+    logger.error(`Erro ao verificar mensagem de campanha: ${err.message}`);
   }
 };
 
