@@ -565,10 +565,17 @@ async function verifyAndFinalizeCampaign(campaign: any) {
     // Calcula a taxa de sucesso
     const successRate = validContacts > 0 ? (deliveredCount / validContacts) * 100 : 0;
     
-    // Atualiza a taxa de sucesso
+    // Atualiza a taxa de sucesso e emite evento para o frontend
     await updatedCampaign.update({ 
       successRate,
       lastDeliveryAt: moment()
+    });
+
+    // Emite evento de atualização para o frontend
+    const io = getIO();
+    io.to(`company-${updatedCampaign.companyId}-mainchannel`).emit(`company-${updatedCampaign.companyId}-campaign`, {
+      action: "update",
+      record: updatedCampaign
     });
 
     logger.info(`Campanha ${campaign.id}: ${deliveredCount}/${validContacts} mensagens entregues (${successRate.toFixed(2)}%)`);
@@ -582,8 +589,7 @@ async function verifyAndFinalizeCampaign(campaign: any) {
 
       logger.info(`Campanha ${campaign.id} finalizada com sucesso`);
 
-      const io = getIO();
-      io.to(`company-${campaign.companyId}-mainchannel`).emit(`company-${campaign.companyId}-campaign`, {
+      io.to(`company-${updatedCampaign.companyId}-mainchannel`).emit(`company-${updatedCampaign.companyId}-campaign`, {
         action: "update",
         record: updatedCampaign
       });
@@ -603,14 +609,13 @@ async function verifyAndFinalizeCampaign(campaign: any) {
 
         logger.info(`Campanha ${campaign.id} marcada como parcialmente concluída após ${minutesSinceLastDelivery} minutos sem novas entregas`);
 
-        const io = getIO();
-        io.to(`company-${campaign.companyId}-mainchannel`).emit(`company-${campaign.companyId}-campaign`, {
+        io.to(`company-${updatedCampaign.companyId}-mainchannel`).emit(`company-${updatedCampaign.companyId}-campaign`, {
           action: "update",
           record: updatedCampaign
         });
       }
     }
-  } catch (err: any) {
+  } catch (err) {
     Sentry.captureException(err);
     logger.error(`Erro ao verificar finalização da campanha ${campaign.id}: ${err.message}`);
   }
