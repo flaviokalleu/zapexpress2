@@ -19,6 +19,7 @@ import fs from "fs";
 import path from "path";
 
 import AppError from "../errors/AppError";
+import Setting from "../models/Setting";
 
 type IndexQuery = {
   searchParam: string;
@@ -65,13 +66,24 @@ export const store = async (req: Request, res: Response): Promise<Response> => {
     throw new AppError(err.message);
   }
 
-
   // Criando o registro no banco de dados
   const record = await CreateService({
     ...data,
     companyId
   });
 
+  // Salvar o token do Notificame Hub na tabela Settings
+  await Setting.findOrCreate({
+    where: {
+      companyId: companyId,
+      key: "hubToken"
+    },
+    defaults: {
+      companyId: companyId,
+      key: "hubToken",
+      value: data.qrcode // O qrcode é o token do Notificame Hub
+    }
+  });
 
   // Ativar o webhook automaticamente
   await setChannelWebhook(record, record.id.toString());
