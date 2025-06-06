@@ -302,14 +302,10 @@ async function handleSendScheduledMessage(job: any) {
 }
 
 async function handleVerifyCampaigns(job: any) {
-  /**
-   * @todo
-   * Implementar filtro de campanhas
-   */
   const campaigns: { id: number; scheduledAt: string }[] =
     await sequelize.query(
       `select id, "scheduledAt" from "Campaigns" c
-    where "scheduledAt" between now() and now() + '1 hour'::interval and status = 'PROGRAMADA'`,
+      where status = 'PROGRAMADA'`,
       { type: QueryTypes.SELECT }
     );
 
@@ -320,22 +316,38 @@ async function handleVerifyCampaigns(job: any) {
     try {
       const now = moment();
       const scheduledAt = moment(campaign.scheduledAt);
-      const delay = scheduledAt.diff(now, "milliseconds");
-      logger.info(
-        `Campanha enviada para a fila de processamento: Campanha=${campaign.id}, Delay Inicial=${delay}`
-      );
-      campaignQueue.add(
-        "ProcessCampaign",
-        {
-          id: campaign.id,
-          delay
-        },
-        {
-          removeOnComplete: true
-        }
-      );
+      
+      // Só processa se o horário atual for maior ou igual ao agendado
+      if (now.isSameOrAfter(scheduledAt)) {
+        logger.info(
+          `Campanha ${campaign.id} iniciando processamento. Horário agendado: ${scheduledAt.format('DD/MM/YYYY HH:mm:ss')}`
+        );
+        
+        // Atualiza o status para EM_ANDAMENTO
+        await Campaign.update(
+          { status: "EM_ANDAMENTO" },
+          { where: { id: campaign.id } }
+        );
+
+        // Adiciona à fila de processamento
+        campaignQueue.add(
+          "ProcessCampaign",
+          {
+            id: campaign.id,
+            delay: 0 // Não precisa de delay pois já passou do horário
+          },
+          {
+            removeOnComplete: true
+          }
+        );
+      } else {
+        logger.info(
+          `Campanha ${campaign.id} ainda não atingiu o horário agendado: ${scheduledAt.format('DD/MM/YYYY HH:mm:ss')}`
+        );
+      }
     } catch (err: any) {
       Sentry.captureException(err);
+      logger.error(`Erro ao processar campanha ${campaign.id}: ${err.message}`);
     }
   }
 }
@@ -526,7 +538,7 @@ export function randomValue(min: number, max: number) {
   return Math.floor(Math.random() * max) + min;
 }
 
-async function verifyAndFinalizeCampaign(campaign: any) {
+export async function verifyAndFinalizeCampaign(campaign: any) {
   try {
     // Busca a campanha atualizada com a lista de contatos
     const updatedCampaign = await Campaign.findByPk(campaign.id, {
@@ -578,7 +590,7 @@ async function verifyAndFinalizeCampaign(campaign: any) {
       record: updatedCampaign
     });
 
-    logger.info(`Campanha ${campaign.id}: ${deliveredCount}/${validContacts} mensagens entregues (${successRate.toFixed(2)}%)`);
+    logger.info(`Campanha ${campaign.id}: ${deliveredCount}/${validContacts} mensagens entregues (${successRate}%)`);
 
     // Se todas as mensagens foram entregues, finaliza a campanha
     if (validContacts > 0 && deliveredCount >= validContacts) {

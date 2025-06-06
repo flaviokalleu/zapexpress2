@@ -15,6 +15,7 @@ import Company from "./Company";
 import ContactList from "./ContactList";
 import Whatsapp from "./Whatsapp";
 import Files from "./Files";
+import { DataTypes } from "sequelize";
 
 @Table({ tableName: "Campaigns" })
 class Campaign extends Model<Campaign> {
@@ -74,7 +75,7 @@ class Campaign extends Model<Campaign> {
   @Column
   completedAt: Date;
 
-  @Column({ defaultValue: 0 })
+  @Column({ defaultValue: 0, type: DataTypes.DECIMAL(5, 2) })
   successRate: number;
 
   @Column
