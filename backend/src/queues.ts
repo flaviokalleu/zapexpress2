@@ -606,13 +606,13 @@ export async function verifyAndFinalizeCampaign(campaign: any) {
         record: updatedCampaign
       });
     } 
-    // Se a taxa de sucesso for maior que 80% e não houver novas entregas por 10 minutos
-    else if (successRate >= 80) {
+    // Se não houver novas entregas por 5 minutos, marca como parcialmente concluída
+    else {
       const lastDelivery = moment(updatedCampaign.lastDeliveryAt);
       const now = moment();
       const minutesSinceLastDelivery = now.diff(lastDelivery, 'minutes');
 
-      if (minutesSinceLastDelivery >= 10) {
+      if (minutesSinceLastDelivery >= 5) {
         await updatedCampaign.update({ 
           status: "PARCIALMENTE_CONCLUÍDA",
           completedAt: moment(),
