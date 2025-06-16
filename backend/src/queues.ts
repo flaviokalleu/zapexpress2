@@ -890,9 +890,9 @@ async function handleDispatchCampaign(job: any) {
         const files = await ShowFileService(campaign?.fileListId!, campaign?.companyId!)
         const folder = path.resolve(publicFolder, `company${campaign?.companyId}`,"fileList", String(files.id))
         for (const [index, file] of files.options.entries()) {
-          /*const options = await getMessageOptions(file.path, path.resolve(folder, file.path), file.name);*/
-
-          const options = await getMessageOptions(file.name, path.resolve(folder, file.path), String(campaign?.companyId!), body);
+          // Usa a mensagem original do arquivo se disponível, senão usa a mensagem da campanha
+          const messageToUse = file.message || body;
+          const options = await getMessageOptions(file.name, path.resolve(folder, file.path), String(campaign?.companyId!), messageToUse);
           await wbot.sendMessage(chatId, { ...options });
         };
       } catch (error) {
