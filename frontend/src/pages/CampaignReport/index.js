@@ -157,7 +157,7 @@ const CampaignReport = () => {
       </MainHeader>
       <Paper className={classes.mainPaper} variant="outlined">
         <Typography variant="h6" component="h2">
-          Status: {formatStatus(campaign.status)} ({campaign.successRate?.toFixed(2)}% de sucesso)
+          Status: {formatStatus(campaign.status)} ({typeof campaign.successRate === 'number' ? campaign.successRate.toFixed(2) : campaign.successRate || '0'}% de sucesso)
         </Typography>
         <Grid spacing={2} container>
           <Grid xs={12} item>

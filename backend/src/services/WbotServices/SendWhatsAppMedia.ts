@@ -17,7 +17,8 @@ interface Request {
   ticket: Ticket;
   companyId?: number;
   body?: string;
-  isForwarded?: boolean;  
+  isForwarded?: boolean;
+  originalMessage?: string;
 }
 
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -141,7 +142,8 @@ const SendWhatsAppMedia = async ({
   media,
   ticket,
   body,
-  isForwarded = false
+  isForwarded = false,
+  originalMessage
 }: Request): Promise<WAMessage> => {
   try {
     const wbot = await GetTicketWbot(ticket);
@@ -150,7 +152,10 @@ const SendWhatsAppMedia = async ({
     const pathMedia = media.path;
     const typeMessage = media.mimetype.split("/")[0];
     let options: AnyMessageContent;
-    const bodyMessage = formatBody(body, ticket.contact)
+    
+    // Usa a mensagem original se disponível, senão usa a mensagem do corpo
+    const messageToUse = originalMessage || body;
+    const bodyMessage = formatBody(messageToUse, ticket.contact);
 
     if (typeMessage === "video") {
       options = {
