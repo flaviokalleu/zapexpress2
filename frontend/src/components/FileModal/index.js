@@ -86,7 +86,10 @@ const FileListSchema = Yup.object().shape({
         .required("Obrigatório"),
     options: Yup.array().of(
         Yup.object().shape({
-            file: Yup.mixed().required("Arquivo é obrigatório")
+            file: Yup.mixed().required("Arquivo é obrigatório"),
+            message: Yup.string()
+                .max(255, "A mensagem deve ter no máximo 255 caracteres")
+                .required("Mensagem é obrigatória")
         })
     ).min(1, "Selecione pelo menos um arquivo")
 });
@@ -165,7 +168,7 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
 
     const initialState = {
         message: "",
-        options: [{ file: null }],
+        options: [{ file: null, message: "" }],
     };
 
     const [fileList, setFileList] = useState(initialState);
@@ -300,8 +303,22 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
                                                         className={classes.extraAttr}
                                                         key={`${index}-option`}
                                                     >
-                                                        <Grid container spacing={0}>
-                                                            <Grid xs={6} md={10} item>
+                                                        <Grid container spacing={2}>
+                                                            <Grid xs={12} md={12} item>
+                                                                <Field
+                                                                    as={TextField}
+                                                                    label="Mensagem do arquivo"
+                                                                    name={`options.${index}.message`}
+                                                                    error={touched.options?.[index]?.message && Boolean(errors.options?.[index]?.message)}
+                                                                    helperText={touched.options?.[index]?.message && errors.options?.[index]?.message}
+                                                                    variant="outlined"
+                                                                    margin="dense"
+                                                                    fullWidth
+                                                                    multiline
+                                                                    minRows={2}
+                                                                />
+                                                            </Grid>
+                                                            <Grid xs={12} md={12} item>
                                                                 <Field
                                                                     name={`options.${index}.file`}
                                                                     component={({ field, form }) => (
@@ -322,7 +339,7 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
                                                                         component="span"
                                                                         startIcon={<AttachFileIcon />}
                                                                     >
-                                                                        {option.file ? option.file.name : i18n.t("fileModal.form.selectFile")}
+                                                                        {option.file ? option.file.name : "Selecionar arquivo"}
                                                                     </Button>
                                                                 </label>
                                                                 {touched.options?.[index]?.file && errors.options?.[index]?.file && (
@@ -331,7 +348,7 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
                                                                     </Typography>
                                                                 )}
                                                             </Grid>
-                                                            <Grid xs={6} md={2} item>
+                                                            <Grid xs={12} md={12} item style={{ display: 'flex', justifyContent: 'flex-end' }}>
                                                                 <IconButton
                                                                     onClick={() => remove(index)}
                                                                     disabled={values.options.length === 1}
@@ -340,14 +357,15 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
                                                                 </IconButton>
                                                             </Grid>
                                                         </Grid>
+                                                        <Divider style={{ margin: '16px 0' }} />
                                                     </div>
                                                 ))}
                                             <Button
-                                                onClick={() => push({ file: null })}
+                                                onClick={() => push({ file: null, message: "" })}
                                                 variant="outlined"
                                                 style={{ marginTop: 8 }}
                                             >
-                                                {i18n.t("fileModal.form.addFile")}
+                                                Adicionar arquivo
                                             </Button>
                                         </>
                                     )}
