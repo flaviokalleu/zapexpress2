@@ -204,6 +204,7 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
                     formData.append("files", fileOption.file);
                     formData.append("mediaType", fileOption.file.type);
                     formData.append("name", generateFileName(fileOption.file));
+                    formData.append("message", fileOption.message);
                     formData.append("id", options[index].id);
                 }
             });
@@ -218,9 +219,15 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
         }
 
         try {
-            // Remove o campo name do objeto antes de enviar
-            const { name, ...fileDataWithoutName } = values;
-            const fileData = { ...fileDataWithoutName, userId: user.id };
+            // Gera nomes para todos os arquivos e adiciona ao objeto antes de enviar
+            const fileData = { 
+                ...values, 
+                userId: user.id,
+                options: values.options.map(option => ({
+                    ...option,
+                    name: option.file ? generateFileName(option.file) : null
+                }))
+            };
             
             let data;
             if (fileListId) {
@@ -386,7 +393,7 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
                                     className={classes.btnWrapper}
                                     disabled={isSubmitting}
                                 >
-                                    {i18n.t("fileModal.buttons.ok")}
+                                    OK
                                     {isSubmitting && (
                                         <CircularProgress
                                             size={24}

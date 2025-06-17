@@ -82,7 +82,9 @@ export const uploadMedias = async (req: Request, res: Response): Promise<Respons
 
         fileOpt.update({
           path: file.filename.replace('/','-'),
-          mediaType: Array.isArray(mediaType)? mediaType[index] : mediaType
+          mediaType: Array.isArray(mediaType)? mediaType[index] : mediaType,
+          name: Array.isArray(req.body.name)? req.body.name[index] : req.body.name,
+          message: Array.isArray(req.body.message)? req.body.message[index] : req.body.message
         }) ;
       }
     }
