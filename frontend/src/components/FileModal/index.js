@@ -81,12 +81,77 @@ const useStyles = makeStyles(theme => ({
 }));
 
 const FileListSchema = Yup.object().shape({
-    name: Yup.string()
-        .min(3, "nome muito curto")
-        .required("Obrigatório"),
     message: Yup.string()
+        .max(255, "A mensagem deve ter no máximo 255 caracteres")
         .required("Obrigatório")
 });
+
+const generateFileName = (file) => {
+    const timestamp = new Date().getTime();
+    const extension = file.name.split('.').pop().toLowerCase();
+    
+    // Primeiro tenta identificar pelo MIME type
+    let fileType = file.type.split('/')[0];
+    
+    // Se não conseguir identificar pelo MIME type, tenta pela extensão
+    if (fileType === 'application' || fileType === 'other') {
+        switch(extension) {
+            case 'mp4':
+            case 'avi':
+            case 'mov':
+            case 'wmv':
+            case 'flv':
+            case 'mkv':
+                fileType = 'video';
+                break;
+            case 'mp3':
+            case 'wav':
+            case 'ogg':
+            case 'm4a':
+            case 'aac':
+                fileType = 'audio';
+                break;
+            case 'jpg':
+            case 'jpeg':
+            case 'png':
+            case 'gif':
+            case 'bmp':
+            case 'webp':
+                fileType = 'image';
+                break;
+            case 'txt':
+            case 'doc':
+            case 'docx':
+            case 'pdf':
+            case 'xls':
+            case 'xlsx':
+            case 'ppt':
+            case 'pptx':
+                fileType = 'text';
+                break;
+            default:
+                fileType = 'outros';
+        }
+    }
+    
+    let typePrefix = 'outros';
+    switch(fileType) {
+        case 'image':
+            typePrefix = 'imagem';
+            break;
+        case 'video':
+            typePrefix = 'video';
+            break;
+        case 'audio':
+            typePrefix = 'audio';
+            break;
+        case 'text':
+            typePrefix = 'texto';
+            break;
+    }
+    
+    return `${typePrefix}_${timestamp}`;
+};
 
 const FilesModal = ({ open, onClose, fileListId, reload }) => {
     const classes = useStyles();
@@ -94,9 +159,7 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
     const [ files, setFiles ] = useState([]);
     const [selectedFileNames, setSelectedFileNames] = useState([]);
 
-
     const initialState = {
-        name: "",
         message: "",
         options: [{ name: "", path:"", mediaType:"" }],
     };
@@ -123,27 +186,26 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
     };
 
     const handleSaveFileList = async (values) => {
-
         const uploadFiles = async (options, filesOptions, id) => {
-                const formData = new FormData();
-                formData.append("fileId", id);
-                formData.append("typeArch", "fileList")
-                filesOptions.forEach((fileOption, index) => {
-                    if (fileOption.file) {
-                        formData.append("files", fileOption.file);
-                        formData.append("mediaType", fileOption.file.type)
-                        formData.append("name", options[index].name);
-                        formData.append("id", options[index].id);
-                    }
-                });
+            const formData = new FormData();
+            formData.append("fileId", id);
+            formData.append("typeArch", "fileList")
+            filesOptions.forEach((fileOption, index) => {
+                if (fileOption.file) {
+                    formData.append("files", fileOption.file);
+                    formData.append("mediaType", fileOption.file.type);
+                    formData.append("name", generateFileName(fileOption.file));
+                    formData.append("id", options[index].id);
+                }
+            });
       
-              try {
+            try {
                 const { data } = await api.post(`/files/uploadList/${id}`, formData);
                 setFiles([]);
                 return data;
-              } catch (err) {
+            } catch (err) {
                 toastError(err);
-              }
+            }
             return null;
         }
 
@@ -153,7 +215,6 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
             if (fileListId) {
                 const { data } = await api.put(`/files/${fileListId}`, fileData)
                 if (data.options.length > 0)
-
                     uploadFiles(data.options, values.options, fileListId)
             } else {
                 const { data } = await api.post("/files", fileData);
@@ -195,19 +256,6 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
                     {({ touched, errors, isSubmitting, values }) => (
                         <Form>
                             <DialogContent dividers>
-                                <div className={classes.multFieldLine}>
-                                    <Field
-                                        as={TextField}
-                                        label={i18n.t("fileModal.form.name")}
-                                        name="name"
-                                        error={touched.name && Boolean(errors.name)}
-                                        helperText={touched.name && errors.name}
-                                        variant="outlined"
-                                        margin="dense"
-                                        fullWidth
-                                    />
-                                </div>
-                                <br />
                                 <div className={classes.multFieldLine}>
                                     <Field
                                         as={TextField}
