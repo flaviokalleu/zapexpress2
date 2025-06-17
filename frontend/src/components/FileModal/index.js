@@ -223,6 +223,7 @@ const FilesModal = ({ open, onClose, fileListId, reload }) => {
             const fileData = { 
                 ...values, 
                 userId: user.id,
+                name: values.name || values.message.substring(0, 50) || "Lista de Arquivos", // Mantém o nome existente ou usa a mensagem
                 options: values.options.map(option => ({
                     ...option,
                     name: option.file ? generateFileName(option.file) : null
