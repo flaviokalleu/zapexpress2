@@ -18,6 +18,7 @@ import Ticket from "./Ticket";
 import Company from "./Company";
 import Schedule from "./Schedule";
 import Whatsapp from "./Whatsapp";
+import Group from "./Group";
 
 @Table
 class Contact extends Model<Contact> {
@@ -93,6 +94,13 @@ class Contact extends Model<Contact> {
 
   @Column
   instagramId: string;
+
+  @ForeignKey(() => Group)
+  @Column
+  groupId: number;
+
+  @BelongsTo(() => Group)
+  group: Group;
 }
 
 export default Contact;

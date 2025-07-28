@@ -21,6 +21,10 @@ import CheckCircleIcon from "@material-ui/icons/CheckCircle";
 import IconButton from "@material-ui/core/IconButton";
 import DeleteOutlineIcon from "@material-ui/icons/DeleteOutline";
 import EditIcon from "@material-ui/icons/Edit";
+import Select from "@material-ui/core/Select";
+import MenuItem from "@material-ui/core/MenuItem";
+import FormControl from "@material-ui/core/FormControl";
+import InputLabel from "@material-ui/core/InputLabel";
 import api from "../../services/api";
 import TableRowSkeleton from "../../components/TableRowSkeleton";
 import ContactModal from "../../components/ContactModal";
@@ -118,6 +122,7 @@ const Contacts = () => {
   const [loading, setLoading] = useState(false);
   const [pageNumber, setPageNumber] = useState(1);
   const [searchParam, setSearchParam] = useState("");
+  const [groupId, setGroupId] = useState("");
   const [contacts, dispatch] = useReducer(reducer, []);
   const [selectedContactId, setSelectedContactId] = useState(null);
   const [contactModalOpen, setContactModalOpen] = useState(false);
@@ -128,6 +133,7 @@ const Contacts = () => {
   const [hasMore, setHasMore] = useState(false);
   const [selectAll, setSelectAll] = useState(false); // Estado para controlar se todos os checkboxes estão marcados
   const [selectedContacts, setSelectedContacts] = useState([]);
+  const [groups, setGroups] = useState([]);
   const fileUploadRef = useRef(null);
 
   
@@ -157,9 +163,21 @@ const handleCheckboxChange = (contactId) => {
   const socketManager = useContext(SocketContext);
 
   useEffect(() => {
+    const fetchGroups = async () => {
+      try {
+        const { data } = await api.get("/groups");
+        setGroups(data);
+      } catch (err) {
+        toastError(err);
+      }
+    };
+    fetchGroups();
+  }, []);
+
+  useEffect([searchParam, groupId], () => {
     dispatch({ type: "RESET" });
     setPageNumber(1);
-  }, [searchParam]);
+  });
 
   useEffect(() => {
     setLoading(true);
@@ -167,7 +185,7 @@ const handleCheckboxChange = (contactId) => {
       const fetchContacts = async () => {
         try {
           const { data } = await api.get("/contacts/", {
-            params: { searchParam, pageNumber },
+            params: { searchParam, pageNumber, groupId },
           });
           dispatch({ type: "LOAD_CONTACTS", payload: data.contacts });
           setHasMore(data.hasMore);
@@ -179,7 +197,7 @@ const handleCheckboxChange = (contactId) => {
       fetchContacts();
     }, 500);
     return () => clearTimeout(delayDebounceFn);
-  }, [searchParam, pageNumber]);
+  }, [searchParam, pageNumber, groupId]);
 
   useEffect(() => {
     const companyId = localStorage.getItem("companyId");
@@ -401,6 +419,23 @@ function getDateLastMessage(contact) {
               ),
             }}
           />
+          <FormControl style={{ minWidth: 120 }}>
+            <InputLabel>Grupo</InputLabel>
+            <Select
+              value={groupId}
+              onChange={(e) => setGroupId(e.target.value)}
+              displayEmpty
+            >
+              <MenuItem value="">
+                <em>Todos os grupos</em>
+              </MenuItem>
+              {groups.map((group) => (
+                <MenuItem key={group.id} value={group.id}>
+                  {group.name}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
           <Button
           variant="contained"
           color="primary"
@@ -525,8 +560,9 @@ function getDateLastMessage(contact) {
               <TableCell>{i18n.t("contacts.table.name")}</TableCell>
               <TableCell align="center">{i18n.t("contacts.table.whatsapp")}</TableCell>
               <TableCell align="center">Messenger</TableCell>
-              <TableCell align="center">Instagram</TableCell>
-              <TableCell align="center">{i18n.t("contacts.table.email")}</TableCell>
+                          <TableCell align="center">Instagram</TableCell>
+            <TableCell align="center">{i18n.t("contacts.table.email")}</TableCell>
+            <TableCell align="center">Grupo</TableCell>
               {/*<TableCell align="center">
               {"Última Interação"}
               </TableCell>
@@ -552,6 +588,7 @@ function getDateLastMessage(contact) {
                                     <TableCell align="center">{contact.messengerId}</TableCell>
                                     <TableCell align="center">{contact.instagramId}</TableCell>
                                     <TableCell align="center">{contact.email}</TableCell>
+                                    <TableCell align="center">{contact.group?.name || "-"}</TableCell>
                                     {/*<TableCell align="center">
                                         {getDateLastMessage(contact)}
                                     </TableCell>

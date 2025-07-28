@@ -18,6 +18,10 @@ import DeleteOutlineIcon from "@material-ui/icons/DeleteOutline";
 import CircularProgress from "@material-ui/core/CircularProgress";
 import FormControlLabel from "@material-ui/core/FormControlLabel";
 import Switch from "@material-ui/core/Switch";
+import Select from "@material-ui/core/Select";
+import MenuItem from "@material-ui/core/MenuItem";
+import FormControl from "@material-ui/core/FormControl";
+import InputLabel from "@material-ui/core/InputLabel";
 import { i18n } from "../../translate/i18n";
 
 import api from "../../services/api";
@@ -77,15 +81,29 @@ const ContactModal = ({ open, onClose, contactId, initialValues, onSave }) => {
 		name: "",
 		number: "",
 		email: "",
-		disableBot: false
+		disableBot: false,
+		groupId: ""
 	};
 
 	const [contact, setContact] = useState(initialState);
+	const [groups, setGroups] = useState([]);
 
 	useEffect(() => {
 		return () => {
 			isMounted.current = false;
 		};
+	}, []);
+
+	useEffect(() => {
+		const fetchGroups = async () => {
+			try {
+				const { data } = await api.get("/groups");
+				setGroups(data);
+			} catch (err) {
+				toastError(err);
+			}
+		};
+		fetchGroups();
 	}, []);
 
 	useEffect(() => {
@@ -193,6 +211,28 @@ const ContactModal = ({ open, onClose, contactId, initialValues, onSave }) => {
 										margin="dense"
 										variant="outlined"
 									/>
+								</div>
+								<div>
+									<FormControl fullWidth margin="dense" variant="outlined">
+										<InputLabel>Grupo</InputLabel>
+										<Field
+											as={Select}
+											name="groupId"
+											value={values.groupId || ""}
+											onChange={(e) => {
+												setContact({ ...values, groupId: e.target.value });
+											}}
+										>
+											<MenuItem value="">
+												<em>Selecione um grupo</em>
+											</MenuItem>
+											{groups.map((group) => (
+												<MenuItem key={group.id} value={group.id}>
+													{group.name}
+												</MenuItem>
+											))}
+										</Field>
+									</FormControl>
 								</div>
 								<>
 								<FormControlLabel
