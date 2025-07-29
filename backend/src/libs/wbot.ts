@@ -16,7 +16,7 @@ import makeWASocket, {
   WAMessageKey,
   jidNormalizedUser
 } from "@whiskeysockets/baileys";
-import makeInMemoryStore from "@whiskeysockets/baileys/lib/Store/make-in-memory-store";
+import { makeInMemoryStore } from "@rodrigogs/baileys-store";
 import { Op } from "sequelize";
 import { FindOptions } from "sequelize/types";
 import Whatsapp from "../models/Whatsapp";

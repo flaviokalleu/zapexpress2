@@ -13,6 +13,7 @@ import {
 } from "sequelize-typescript";
 import Contact from "./Contact";
 import Message from "./Message";
+import Group from "./Group";
 
 import Plan from "./Plan";
 import Queue from "./Queue";
@@ -128,6 +129,13 @@ class Company extends Model<Company> {
     hooks: true
   })
   ticketTrankins: TicketTraking[];
+
+  @HasMany(() => Group, {
+    onUpdate: "CASCADE",
+    onDelete: "CASCADE",
+    hooks: true
+  })
+  groups: Group[];
 }
 
 export default Company;
