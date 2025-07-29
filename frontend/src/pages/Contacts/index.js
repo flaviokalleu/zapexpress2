@@ -53,7 +53,7 @@ import {
     CloudDownload,
     ContactPhone,
 } from "@material-ui/icons";
-import { Menu, MenuItem } from "@material-ui/core";
+import { Menu } from "@material-ui/core";
 
 /* ícones da Meta */
 import FacebookIcon from "@material-ui/icons/Facebook";
