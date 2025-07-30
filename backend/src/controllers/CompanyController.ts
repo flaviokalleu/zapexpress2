@@ -17,6 +17,7 @@ import ShowCompanyService from "../services/CompanyService/ShowCompanyService";
 import ShowPlanCompanyService from "../services/CompanyService/ShowPlanCompanyService";
 import UpdateCompanyService from "../services/CompanyService/UpdateCompanyService";
 import UpdateSchedulesService from "../services/CompanyService/UpdateSchedulesService";
+import CopyGroupsToCompanyService from "../services/CompanyService/CopyGroupsToCompanyService";
 
 const publicFolder = path.resolve(__dirname, "..", "..", "public");
 
@@ -129,6 +130,20 @@ export const updateSchedules = async (
   });
 
   return res.status(200).json(company);
+};
+
+export const copyGroups = async (
+  req: Request,
+  res: Response
+): Promise<Response> => {
+  const { companyId } = req.params;
+
+  try {
+    await CopyGroupsToCompanyService({ companyId: parseInt(companyId) });
+    return res.status(200).json({ message: "Grupos copiados com sucesso" });
+  } catch (error) {
+    throw new AppError(error.message);
+  }
 };
 
 export const remove = async (

@@ -102,6 +102,8 @@ const reducer = (state, action) => {
   if (action.type === "RESET") {
     return [];
   }
+
+  return state; // Adicionando return padrão
 };
 
 const useStyles = makeStyles((theme) => ({
@@ -174,10 +176,10 @@ const handleCheckboxChange = (contactId) => {
     fetchGroups();
   }, []);
 
-  useEffect([searchParam, groupId], () => {
+  useEffect(() => {
     dispatch({ type: "RESET" });
     setPageNumber(1);
-  });
+  }, [searchParam, groupId]);
 
   useEffect(() => {
     setLoading(true);
@@ -574,7 +576,16 @@ function getDateLastMessage(contact) {
           </TableHead>
           <TableBody>
             <>
-                            {contacts.map((contact) => (
+              {contacts.length === 0 && !loading ? (
+                <TableRow>
+                  <TableCell colSpan={8} align="center">
+                    <div style={{ padding: "20px", color: "gray" }}>
+                      {i18n.t("contacts.noContacts") || "Nenhum contato encontrado"}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ) : (
+                contacts.map((contact) => (
                                 <TableRow key={contact.id}>
                                     <TableCell padding="checkbox">
                                         <Checkbox
@@ -663,7 +674,8 @@ function getDateLastMessage(contact) {
                                       />
                                     </TableCell>
                 </TableRow>
-              ))}
+              ))
+              )}
               {loading && <TableRowSkeleton avatar columns={3} />}
             </>
           </TableBody>

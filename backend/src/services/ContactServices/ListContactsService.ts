@@ -26,7 +26,7 @@ const ListContactsService = async ({
     [Op.or]: [
       {
         name: Sequelize.where(
-          Sequelize.fn("LOWER", Sequelize.col("name")),
+          Sequelize.fn("LOWER", Sequelize.col("Contact.name")),
           "LIKE",
           `%${searchParam.toLowerCase().trim()}%`
         )
