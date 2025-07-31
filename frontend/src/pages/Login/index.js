@@ -165,7 +165,7 @@ const Login = () => {
   };
 
   // MODIFICAÇÃO 6: Chave do site do reCAPTCHA (Site Key)
-  const SITE_KEY = "6LeDYTErAAAAAAhl6cg8LGm_u2h62k4I7k9HfLIB";
+  const SITE_KEY = "6LcdIZUrAAAAAMABtFYAuNOgpFVHvulNiSaacqPw";
 
   return (
     <div className={classes.root}>
