@@ -4,6 +4,7 @@ import { has } from "lodash";
 import ContactListItem from "../../models/ContactListItem";
 import CheckContactNumber from "../WbotServices/CheckNumber";
 import { logger } from "../../utils/logger";
+import FindOrCreateGroupService from "../GroupService/FindOrCreateGroupService";
 // import CheckContactNumber from "../WbotServices/CheckNumber";
 
 export async function ImportContacts(
@@ -18,6 +19,7 @@ export async function ImportContacts(
     let name = "";
     let number = "";
     let email = "";
+    let groupName = "";
 
     if (has(row, "nome") || has(row, "Nome")) {
       name = row["nome"] || row["Nome"];
@@ -42,19 +44,47 @@ export async function ImportContacts(
       email = row["email"] || row["e-mail"] || row["Email"] || row["E-mail"];
     }
 
-    return { name, number, email, contactListId, companyId };
+    // Verificar colunas de grupo
+    if (
+      has(row, "grupo") ||
+      has(row, "Grupo") ||
+      has(row, "group") ||
+      has(row, "Group")
+    ) {
+      groupName = row["grupo"] || row["Grupo"] || row["group"] || row["Group"];
+    }
+
+    return { name, number, email, groupName, contactListId, companyId };
   });
 
   const contactList: ContactListItem[] = [];
 
   for (const contact of contacts) {
+    let groupId: number | undefined;
+
+    // Se tem nome de grupo, buscar ou criar o grupo
+    if (contact.groupName && contact.groupName.trim()) {
+      try {
+        const group = await FindOrCreateGroupService({
+          name: contact.groupName,
+          companyId: contact.companyId
+        });
+        groupId = group.id;
+      } catch (error) {
+        logger.error(`Erro ao processar grupo "${contact.groupName}": ${error}`);
+      }
+    }
+
     const [newContact, created] = await ContactListItem.findOrCreate({
       where: {
         number: `${contact.number}`,
         contactListId: contact.contactListId,
         companyId: contact.companyId
       },
-      defaults: contact
+      defaults: {
+        ...contact,
+        groupId
+      }
     });
     if (created) {
       contactList.push(newContact);

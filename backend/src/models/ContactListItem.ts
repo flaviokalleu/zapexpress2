@@ -13,6 +13,7 @@ import {
 } from "sequelize-typescript";
 import Company from "./Company";
 import ContactList from "./ContactList";
+import Group from "./Group";
 
 @Table({ tableName: "ContactListItems" })
 class ContactListItem extends Model<ContactListItem> {
@@ -56,6 +57,13 @@ class ContactListItem extends Model<ContactListItem> {
 
   @BelongsTo(() => ContactList)
   contactList: ContactList;
+
+  @ForeignKey(() => Group)
+  @Column
+  groupId: number;
+
+  @BelongsTo(() => Group)
+  group: Group;
 }
 
 export default ContactListItem;
